@@ -1,0 +1,21 @@
+# tabs source allowlist.
+# institutional_tier: 3 = institutional (standards bodies, CERTs, vendor PSIRTs)
+#                      2 = established secondary (independent researchers, security news)
+#                      1 = tertiary
+# Add more from SPEC.md §11 as you verify their feed URLs — this starter set
+# covers only sources whose feed URL is well-known and stable.
+
+- name: Krebs on Security
+  feed_url: https://krebsonsecurity.com/feed/
+  category: AppSec
+  institutional_tier: 2
+
+- name: Schneier on Security
+  feed_url: https://www.schneier.com/feed/atom/
+  category: AppSec
+  institutional_tier: 2
+
+- name: BleepingComputer
+  feed_url: https://www.bleepingcomputer.com/feed/
+  category: AppSec
+  institutional_tier: 2
