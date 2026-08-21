@@ -1,5 +1,3 @@
-import anthropic
-
 from tabs.curate.models import TriageResult
 
 TRIAGE_MODEL = "claude-haiku-4-5"
@@ -15,7 +13,10 @@ _SYSTEM_PROMPT = (
     "application security, AI/LLM security, or security-relevant industry/"
     "policy news? Marketing content, unrelated tech news, and general "
     "business news are out of scope. If in scope, pick the single "
-    "best-fitting top-level category."
+    "best-fitting top-level category from these three options:\n"
+    "- AppSec\n"
+    "- AI Security\n"
+    "- Policy & Industry"
 )
 
 
