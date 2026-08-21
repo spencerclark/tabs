@@ -33,11 +33,14 @@ def run_ingest(conn: sqlite3.Connection) -> dict:
                 continue
 
             try:
-                store_article(conn, source["id"], entry.url, entry.title, entry.published_at, full_text)
+                _, created = store_article(
+                    conn, source["id"], entry.url, entry.title, entry.published_at, full_text
+                )
             except Exception as exc:  # noqa: BLE001 — one bad article must not kill the run
                 _log_run(conn, source["id"], "error", f"article store failed: {entry.url}: {exc}")
                 continue
-            summary["articles_stored"] += 1
+            if created:  # unchanged re-fetches must not be counted as newly stored
+                summary["articles_stored"] += 1
 
         _record_success(conn, source["id"])
         summary["sources_ok"] += 1

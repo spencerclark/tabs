@@ -5,6 +5,7 @@ import tabs.ingest.orchestrator as orchestrator_module
 from tabs.db import get_connection, init_db
 from tabs.ingest.fetch import FeedFetchError, FetchedEntry
 from tabs.ingest.orchestrator import run_ingest
+from tabs.ingest.storage import _hash_content
 
 
 def _insert_source(conn, name, feed_url):
@@ -97,11 +98,14 @@ def test_run_ingest_refetches_previously_ingested_urls_inside_recheck_window(tmp
     init_db(conn)
     _insert_source(conn, "Source", "https://s.example/feed")
     recent_retrieved_at = datetime.now(timezone.utc).isoformat()
+    # seed the real hash of the text the fetch will return, so the unchanged-content
+    # path is genuinely exercised (a literal placeholder hash never matches and would
+    # mask the double-counting bug)
     conn.execute(
         "INSERT INTO articles (source_id, url, title, full_text, content_hash, "
         "published_at, retrieved_at, previous_version_id) "
-        "VALUES (1, 'https://s.example/recent', 'Recent', 'text', 'hash', NULL, ?, NULL)",
-        (recent_retrieved_at,),
+        "VALUES (1, 'https://s.example/recent', 'Recent', 'text', ?, NULL, ?, NULL)",
+        (_hash_content("text"), recent_retrieved_at),
     )
     conn.commit()
 
@@ -119,7 +123,58 @@ def test_run_ingest_refetches_previously_ingested_urls_inside_recheck_window(tmp
 
     # recent article, inside the 14-day re-check window: must be re-fetched to detect edits/retractions
     assert fetch_calls == ["https://s.example/recent"]
+    # ...but the content is unchanged, so nothing new is stored and nothing is counted
+    assert summary["articles_stored"] == 0
+    assert conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"] == 1
+    conn.close()
+
+
+def test_run_ingest_stores_new_version_when_recheck_finds_changed_content(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+    conn.execute(
+        "INSERT INTO articles (source_id, url, title, full_text, content_hash, "
+        "published_at, retrieved_at, previous_version_id) "
+        "VALUES (1, 'https://s.example/recent', 'Recent', 'old text', ?, NULL, ?, NULL)",
+        (_hash_content("old text"), datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+    recent_entry = FetchedEntry(url="https://s.example/recent", title="Recent", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [recent_entry])
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "new text")
+
+    summary = run_ingest(conn)
+
     assert summary["articles_stored"] == 1
+    rows = conn.execute("SELECT id, previous_version_id FROM articles ORDER BY id").fetchall()
+    assert len(rows) == 2
+    assert rows[1]["previous_version_id"] == rows[0]["id"]
+    conn.close()
+
+
+def test_run_ingest_reports_zero_stored_on_second_run_over_unchanged_content(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    entry = FetchedEntry(url="https://s.example/a", title="A", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    monkeypatch.setattr(
+        orchestrator_module,
+        "fetch_article_text",
+        lambda url: "<html><body><p>Same   article body.</p></body></html>",
+    )
+
+    first = run_ingest(conn)
+    second = run_ingest(conn)
+
+    assert first["articles_stored"] == 1
+    # the article is inside the re-check window and is re-fetched, but the content is
+    # unchanged, so no row is inserted and nothing may be counted as stored
+    assert second["articles_stored"] == 0
+    assert conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"] == 1
     conn.close()
 
 

@@ -54,11 +54,12 @@ def test_store_article_inserts_new_article(tmp_path):
     )
     conn.commit()
 
-    article_id = store_article(
+    article_id, created = store_article(
         conn, source_id=1, url="https://s.example/a", title="A",
         published_at="2026-08-01", full_text="original text",
     )
 
+    assert created is True
     row = conn.execute("SELECT * FROM articles WHERE id = ?", (article_id,)).fetchone()
     assert row["url"] == "https://s.example/a"
     assert row["previous_version_id"] is None
@@ -73,17 +74,18 @@ def test_store_article_returns_same_id_when_content_unchanged(tmp_path):
         "VALUES ('S', 'https://s.example/feed', 'AppSec', 2, 2)"
     )
     conn.commit()
-    first_id = store_article(
+    first_id, _ = store_article(
         conn, source_id=1, url="https://s.example/a", title="A",
         published_at="2026-08-01", full_text="original text",
     )
 
-    second_id = store_article(
+    second_id, created = store_article(
         conn, source_id=1, url="https://s.example/a", title="A",
         published_at="2026-08-01", full_text="original text",
     )
 
     assert first_id == second_id
+    assert created is False
     count = conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"]
     assert count == 1
     conn.close()
@@ -97,17 +99,18 @@ def test_store_article_creates_new_version_when_content_changes(tmp_path):
         "VALUES ('S', 'https://s.example/feed', 'AppSec', 2, 2)"
     )
     conn.commit()
-    first_id = store_article(
+    first_id, _ = store_article(
         conn, source_id=1, url="https://s.example/a", title="A",
         published_at="2026-08-01", full_text="original text",
     )
 
-    second_id = store_article(
+    second_id, created = store_article(
         conn, source_id=1, url="https://s.example/a", title="A",
         published_at="2026-08-01", full_text="updated text",
     )
 
     assert second_id != first_id
+    assert created is True
     row = conn.execute("SELECT previous_version_id FROM articles WHERE id = ?", (second_id,)).fetchone()
     assert row["previous_version_id"] == first_id
     conn.close()

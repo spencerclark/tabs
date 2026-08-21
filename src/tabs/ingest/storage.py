@@ -45,8 +45,13 @@ def store_article(
     title: str,
     published_at: str | None,
     full_text: str,
-) -> int:
-    """Insert a new article, or a new version if content changed since the last fetch."""
+) -> tuple[int, bool]:
+    """Insert a new article, or a new version if content changed since the last fetch.
+
+    Returns ``(article_id, created)`` where ``created`` is True only when a row was
+    actually inserted (first-time ingest or a real content change), and False when the
+    existing unchanged row was returned as-is.
+    """
     content_hash = _hash_content(full_text)
     retrieved_at = datetime.now(timezone.utc).isoformat()
 
@@ -56,7 +61,7 @@ def store_article(
     ).fetchone()
 
     if existing is not None and existing["content_hash"] == content_hash:
-        return existing["id"]
+        return existing["id"], False
 
     previous_version_id = existing["id"] if existing is not None else None
 
@@ -73,4 +78,4 @@ def store_article(
         ),
     )
     conn.commit()
-    return cursor.lastrowid
+    return cursor.lastrowid, True
