@@ -22,8 +22,8 @@ def sources_cmd(ctx: click.Context) -> None:
                 f"tier={effective_tier} failures={row['consecutive_failures']} "
                 f"last_fetch={last_fetch}"
             )
-    except click.ClickException:
-        raise
+    except (click.ClickException, click.Abort, click.exceptions.Exit):
+        raise  # Click's own control flow, already renders cleanly
     except Exception as exc:  # noqa: BLE001 — a clean one-line error beats a traceback
         raise click.ClickException(str(exc)) from exc
     finally:
