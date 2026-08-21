@@ -1,3 +1,5 @@
+from typing import Optional
+
 from tabs.curate.models import TriageResult
 from tabs.curate.prompting import wrap_untrusted
 
@@ -24,8 +26,13 @@ _SYSTEM_PROMPT = (
 )
 
 
-def triage_article(client, title: str, summary: str, source_category: str) -> TriageResult:
+def triage_article(
+    client, title: str, summary: str, source_category: str
+) -> Optional[TriageResult]:
     """Cheap relevance/category pass over a feed entry's title+summary, before fetching the full article.
+
+    Returns None when the model declines to answer: `parsed_output` is None on a refusal,
+    which is not an exception, so callers must null-check before dereferencing.
 
     The title and summary come straight from a third-party feed and are wrapped with
     ``wrap_untrusted`` so a crafted <title> containing a literal closing tag cannot break

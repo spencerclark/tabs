@@ -1,3 +1,5 @@
+from typing import Optional
+
 from tabs.curate.models import ExtractionResult
 from tabs.curate.prompting import wrap_untrusted
 
@@ -46,8 +48,13 @@ _SYSTEM_PROMPT = (
 )
 
 
-def extract_claims_and_perspectives(client, full_text: str, source_name: str) -> ExtractionResult:
+def extract_claims_and_perspectives(
+    client, full_text: str, source_name: str
+) -> Optional[ExtractionResult]:
     """Extract structured claims/perspectives from an article's full text via Claude Sonnet 5.
+
+    Returns None when the model declines to answer: `parsed_output` is None on a refusal,
+    which is not an exception, so callers must null-check before dereferencing.
 
     The article body is attacker-influenced content fetched from a third-party site, so it
     is wrapped with ``wrap_untrusted``: `_extract_text()` upstream unescapes HTML entities
