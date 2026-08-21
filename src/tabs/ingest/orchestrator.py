@@ -95,10 +95,17 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
                 )
                 continue
 
-            counts = store_extraction_result(
-                conn, article_id, source["id"], entry.published_at,
-                datetime.now(timezone.utc).isoformat(), extraction_result,
-            )
+            try:
+                counts = store_extraction_result(
+                    conn, article_id, source["id"], entry.published_at,
+                    datetime.now(timezone.utc).isoformat(), extraction_result,
+                )
+            except Exception as exc:  # noqa: BLE001 — one bad article must not kill the run
+                _log_run(
+                    conn, source["id"], "error",
+                    f"curation store failed: {entry.url}: {type(exc).__name__}: {exc}",
+                )
+                continue
             summary["claims_extracted"] += counts["claims_created"]
             summary["perspectives_extracted"] += counts["perspectives_created"]
 

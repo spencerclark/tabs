@@ -515,3 +515,58 @@ def test_run_ingest_continues_when_extraction_fails_for_one_entry(tmp_path, monk
     ).fetchall()
     assert any("extraction failed" in row["message"] for row in error_rows)
     conn.close()
+
+
+def test_run_ingest_continues_when_curation_store_fails_for_one_entry(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source A", "https://a.example/feed")
+    _insert_source(conn, "Source B", "https://b.example/feed")
+
+    bad_entry = FetchedEntry(url="https://a.example/bad", title="Bad", published_at=None, summary="s")
+    good_entry_a = FetchedEntry(url="https://a.example/good", title="Good", published_at=None, summary="s")
+    good_entry_b = FetchedEntry(url="https://b.example/good", title="Good", published_at=None, summary="s")
+
+    def fake_fetch_feed(feed_url):
+        if feed_url == "https://a.example/feed":
+            return [bad_entry, good_entry_a]
+        return [good_entry_b]
+
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", fake_fetch_feed)
+    _install_default_curation_stubs(monkeypatch)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
+
+    real_store_extraction_result = orchestrator_module.store_extraction_result
+    store_calls = []
+
+    def fake_store_extraction_result(conn, article_id, source_id, published_at, retrieved_at, extraction):
+        store_calls.append(article_id)
+        if len(store_calls) == 1:
+            # bad_entry is processed first; simulate the storage-layer failure a locked
+            # sqlite db (e.g. an overlapping cron run) would raise here.
+            raise sqlite3.OperationalError("database is locked")
+        return real_store_extraction_result(conn, article_id, source_id, published_at, retrieved_at, extraction)
+
+    monkeypatch.setattr(orchestrator_module, "store_extraction_result", fake_store_extraction_result)
+
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+
+    # the failing curation store must not abort the run: the second entry in source A and
+    # all of source B must still be processed.
+    assert len(store_calls) == 3
+    # the article itself is still stored for all three entries — only bad_entry's
+    # curation-storage step failed, so claims/perspectives stay at 0 for it (as they do
+    # for the others, since _no_extraction never produces any).
+    assert summary == {
+        "sources_ok": 2, "sources_failed": 0, "articles_stored": 3, **DEFAULT_SUMMARY_EXTRAS,
+    }
+    error_rows = conn.execute(
+        "SELECT message FROM run_log WHERE status = 'error'"
+    ).fetchall()
+    assert any(
+        "curation store failed" in row["message"] and "https://a.example/bad" in row["message"]
+        for row in error_rows
+    )
+    article_row = conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()
+    assert article_row["n"] == 3
+    conn.close()
