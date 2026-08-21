@@ -44,7 +44,7 @@ def test_store_extraction_result_routes_factual_and_prediction_items_to_claims(t
     assert counts == {"claims_created": 2, "perspectives_created": 0}
     rows = conn.execute(
         "SELECT claim_text, claim_type, category, sub_tags, llm_certainty, author, "
-        "status, published_at, retrieved_at, article_id, source_id "
+        "status, published_at, retrieved_at, article_id, source_id, supporting_excerpt "
         "FROM claims ORDER BY id"
     ).fetchall()
     assert len(rows) == 2
@@ -59,8 +59,10 @@ def test_store_extraction_result_routes_factual_and_prediction_items_to_claims(t
     assert rows[0]["retrieved_at"] == "2026-08-01T00:00:00+00:00"
     assert rows[0]["article_id"] == 1
     assert rows[0]["source_id"] == 1
+    assert rows[0]["supporting_excerpt"] == "quote1"
     assert rows[1]["claim_type"] == "prediction"
     assert rows[1]["author"] is None
+    assert rows[1]["supporting_excerpt"] == "quote2"
     conn.close()
 
 
@@ -87,7 +89,8 @@ def test_store_extraction_result_routes_opinion_items_to_perspectives(tmp_path):
 
     assert counts == {"claims_created": 0, "perspectives_created": 1}
     row = conn.execute(
-        "SELECT perspective_text, category, sub_tags, author, article_id, source_id "
+        "SELECT perspective_text, category, sub_tags, author, article_id, source_id, "
+        "supporting_excerpt, published_at, retrieved_at "
         "FROM perspectives"
     ).fetchone()
     assert row["perspective_text"] == "An opinion"
@@ -96,6 +99,9 @@ def test_store_extraction_result_routes_opinion_items_to_perspectives(tmp_path):
     assert row["author"] == "John"
     assert row["article_id"] == 1
     assert row["source_id"] == 1
+    assert row["supporting_excerpt"] == "quote"
+    assert row["published_at"] == "2026-08-01"
+    assert row["retrieved_at"] == "2026-08-01T00:00:00+00:00"
     assert conn.execute("SELECT COUNT(*) AS n FROM claims").fetchone()["n"] == 0
     conn.close()
 
