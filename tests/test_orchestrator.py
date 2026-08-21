@@ -59,6 +59,53 @@ def test_run_ingest_delays_between_article_fetches_but_not_before_the_first(tmp_
     conn.close()
 
 
+def test_run_ingest_records_a_run_scoped_success_row_even_with_zero_errors(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    entry = FetchedEntry(url="https://s.example/a", title="A", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
+
+    summary = run_ingest(conn, sleep=_no_sleep)
+
+    # a healthy run must leave a trace, otherwise it is indistinguishable from a cron
+    # job that never fired at all
+    row = conn.execute(
+        "SELECT run_started_at, run_finished_at, source_id, status, message "
+        "FROM run_log WHERE source_id IS NULL"
+    ).fetchone()
+    assert row is not None
+    assert row["status"] == "success"
+    assert row["run_started_at"] < row["run_finished_at"]  # not the same timestamp twice
+    assert str(summary["articles_stored"]) in row["message"]
+    conn.close()
+
+
+def test_run_ingest_records_the_run_scoped_row_even_when_a_source_fails(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Bad Source", "https://bad.example/feed")
+
+    def fake_fetch_feed(feed_url):
+        raise FeedFetchError("boom")
+
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", fake_fetch_feed)
+
+    run_ingest(conn, sleep=_no_sleep)
+
+    run_rows = conn.execute("SELECT status FROM run_log WHERE source_id IS NULL").fetchall()
+    assert len(run_rows) == 1
+    assert run_rows[0]["status"] == "success"
+    # the per-source error row is additive, not replaced
+    error_rows = conn.execute(
+        "SELECT status FROM run_log WHERE source_id IS NOT NULL AND status = 'error'"
+    ).fetchall()
+    assert len(error_rows) == 1
+    conn.close()
+
+
 def test_run_ingest_stores_articles_and_records_success(tmp_path, monkeypatch):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
