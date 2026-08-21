@@ -1,5 +1,48 @@
 from tabs.db import get_connection, init_db
-from tabs.ingest.storage import store_article
+from tabs.ingest.storage import _extract_text, store_article
+
+
+def test_extract_text_strips_script_and_style_blocks_with_their_content():
+    html = (
+        "<html><head><style>body { color: red; }</style>"
+        "<script>var token = 'abc123';</script></head>"
+        "<body><p>Real content.</p></body></html>"
+    )
+
+    assert _extract_text(html) == "Real content."
+
+
+def test_extract_text_strips_tags_and_unescapes_entities():
+    html = "<div class='x'><h1>Title</h1><p>A &amp; B &lt;ok&gt;</p></div>"
+
+    assert _extract_text(html) == "Title A & B <ok>"
+
+
+def test_extract_text_collapses_whitespace_and_strips_edges():
+    html = "\n  <p>one   two\n\n\tthree</p>  \n"
+
+    assert _extract_text(html) == "one two three"
+
+
+def test_extract_text_ignores_boilerplate_churn_but_keeps_real_changes():
+    page_a = (
+        "<html><body><nav>Home | About</nav>"
+        "<script>var adSlot = 'req-1111';</script>"
+        "<article>The vulnerability was patched.</article>"
+        "<div class='ad' data-nonce='aaaa'></div></body></html>"
+    )
+    page_b = (
+        "<html><body><nav>Home | About</nav>"
+        "<script>var adSlot = 'req-2222';</script>"
+        "<article>The vulnerability was patched.</article>"
+        "<div class='ad' data-nonce='bbbb'></div></body></html>"
+    )
+    page_changed = page_a.replace(
+        "The vulnerability was patched.", "The vulnerability was NOT patched."
+    )
+
+    assert _extract_text(page_a) == _extract_text(page_b)
+    assert _extract_text(page_a) != _extract_text(page_changed)
 
 
 def test_store_article_inserts_new_article(tmp_path):

@@ -1,8 +1,31 @@
 import hashlib
+import re
 import sqlite3
 from datetime import datetime, timezone
+from html import unescape
 
 import requests
+
+# Minimal, dependency-free HTML -> text extraction. This is deliberately not
+# publication-quality extraction; its job is to remove the dominant sources of
+# spurious content-hash diffs (scripts, style blocks, markup attributes with
+# per-request tokens, whitespace formatting) so the 14-day re-check window
+# detects real edits/retractions instead of boilerplate churn (SPEC §5.3).
+_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_SCRIPT_STYLE_RE = re.compile(
+    r"<(script|style)\b[^>]*>.*?(?:</\1\s*>|\Z)", re.IGNORECASE | re.DOTALL
+)
+_TAG_RE = re.compile(r"<[^>]*>")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _extract_text(html: str) -> str:
+    """Reduce an HTML document to normalized visible text."""
+    text = _COMMENT_RE.sub(" ", html)
+    text = _SCRIPT_STYLE_RE.sub(" ", text)
+    text = _TAG_RE.sub(" ", text)
+    text = unescape(text)
+    return _WHITESPACE_RE.sub(" ", text).strip()
 
 
 def _hash_content(text: str) -> str:
@@ -12,7 +35,7 @@ def _hash_content(text: str) -> str:
 def fetch_article_text(url: str, http_get=requests.get) -> str:
     response = http_get(url, timeout=10)
     response.raise_for_status()
-    return response.text
+    return _extract_text(response.text)
 
 
 def store_article(
