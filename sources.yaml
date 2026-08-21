@@ -3,7 +3,12 @@
 #                      2 = established secondary (independent researchers, security news)
 #                      1 = tertiary
 # Add more from SPEC.md §11 as you verify their feed URLs — this starter set
-# covers only sources whose feed URL is well-known and stable.
+# covers only sources whose feed URL is well-known and stable. In particular,
+# add SPEC.md §11's institutional-tier sources (OWASP, NIST, MITRE, CISA,
+# Google Project Zero, MSRC, Anthropic/OpenAI/DeepMind safety blogs) once
+# you've confirmed each one's current feed URL — they weren't included here
+# because institutional feed URLs tend to be less stable/predictable than
+# the independent blogs below.
 
 - name: Krebs on Security
   feed_url: https://krebsonsecurity.com/feed/
@@ -18,4 +23,17 @@
 - name: BleepingComputer
   feed_url: https://www.bleepingcomputer.com/feed/
   category: AppSec
+  institutional_tier: 2
+
+# AI Security coverage — verify these two feed URLs before relying on them;
+# they're well-known blogs but their exact feed paths are less certain than
+# the AppSec sources above.
+- name: Simon Willison's Weblog
+  feed_url: https://simonwillison.net/atom/everything/
+  category: AI Security
+  institutional_tier: 2
+
+- name: Embrace The Red
+  feed_url: https://embracethered.com/blog/index.xml
+  category: AI Security
   institutional_tier: 2
