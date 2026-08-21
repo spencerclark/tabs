@@ -1,6 +1,11 @@
 import sqlite3
 from pathlib import Path
 
+# Bumped whenever the schema below changes in a way that needs a migration, so drift
+# between an existing database file and this file can be detected instead of silently
+# producing confusing errors later.
+SCHEMA_VERSION = 1
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,6 +29,10 @@ CREATE TABLE IF NOT EXISTS articles (
     retrieved_at TEXT NOT NULL,
     previous_version_id INTEGER REFERENCES articles(id)
 );
+
+-- store_article and the orchestrator's already-ingested / re-check-window lookups all
+-- filter articles by url, once per feed entry per run.
+CREATE INDEX IF NOT EXISTS idx_articles_url ON articles(url);
 
 CREATE TABLE IF NOT EXISTS claims (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,4 +113,5 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()

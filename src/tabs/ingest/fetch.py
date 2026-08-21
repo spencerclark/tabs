@@ -27,7 +27,8 @@ def fetch_feed(feed_url: str, sleep=time.sleep) -> list[FetchedEntry]:
         parsed = feedparser.parse(feed_url)
         if parsed.get("bozo") and not parsed.entries:
             last_error = parsed.get("bozo_exception")
-            sleep(BACKOFF_BASE_SECONDS * (2**attempt))
+            if attempt < MAX_RETRIES - 1:  # no point backing off after the last attempt
+                sleep(BACKOFF_BASE_SECONDS * (2**attempt))
             continue
         sleep(REQUEST_DELAY_SECONDS)
         return [
