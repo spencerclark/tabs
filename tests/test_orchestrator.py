@@ -550,7 +550,7 @@ def test_run_ingest_triages_only_entries_it_has_never_seen_before(tmp_path, monk
 
 def test_run_ingest_raises_when_every_triage_call_fails(tmp_path, monkeypatch):
     """anthropic.Anthropic() does not validate credentials until the first request, so a
-    missing/invalid ANTHROPIC_API_KEY fails every triage call individually — each caught
+    missing/invalid ANTHROPIC_API_KEY fails every Anthropic call individually — each caught
     and logged by the per-article guard — and the run would otherwise exit 0 reporting
     articles_stored=0. A cron job would report success forever while doing nothing."""
     conn = get_connection(tmp_path / "test.db")
@@ -570,7 +570,7 @@ def test_run_ingest_raises_when_every_triage_call_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", _no_extraction)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
-    with pytest.raises(RuntimeError, match="every triage call failed"):
+    with pytest.raises(RuntimeError, match="every Anthropic API call failed"):
         run_ingest(conn, client=None, sleep=_no_sleep)
 
     # the run-completion row is still written before the failure is raised: the run did
@@ -597,7 +597,7 @@ def test_run_ingest_raises_when_every_triage_call_returns_no_parsed_output(tmp_p
     monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", _no_extraction)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
-    with pytest.raises(RuntimeError, match="every triage call failed"):
+    with pytest.raises(RuntimeError, match="every Anthropic API call failed"):
         run_ingest(conn, client=None, sleep=_no_sleep)
     conn.close()
 
@@ -681,6 +681,97 @@ def test_run_ingest_does_not_raise_when_all_triage_calls_succeed_as_out_of_scope
     summary = run_ingest(conn, client=None, sleep=_no_sleep)  # must not raise
 
     assert summary["articles_out_of_scope"] == 1
+    conn.close()
+
+
+def test_run_ingest_does_not_raise_when_a_failed_triage_call_is_offset_by_a_successful_extraction(
+    tmp_path, monkeypatch
+):
+    """A re-check-window entry skips triage entirely (see the "triages only entries it has
+    never seen before" test), so on a run with one new (triage-only) entry and one
+    re-checked (extraction-only) entry, a single failed triage call must not look like a
+    100% failure rate just because extraction — a different Anthropic call — isn't counted
+    alongside it. The all-calls-failed check must count both call types together."""
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+    conn.execute(
+        "INSERT INTO articles (source_id, url, title, full_text, content_hash, "
+        "published_at, retrieved_at, previous_version_id) "
+        "VALUES (1, 'https://s.example/recent', 'Recent', 'old text', ?, NULL, ?, NULL)",
+        (_hash_content("old text"), datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+    entries = [
+        FetchedEntry(url="https://s.example/recent", title="Recent", published_at=None, summary="s"),
+        FetchedEntry(url="https://s.example/new", title="New", published_at=None, summary="s"),
+    ]
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: entries)
+    monkeypatch.setattr(
+        orchestrator_module,
+        "fetch_article_text",
+        lambda url: "new text" if url == "https://s.example/recent" else "full text",
+    )
+
+    def failing_triage(client, title, summary, source_category):
+        raise RuntimeError("simulated transient network error")
+
+    monkeypatch.setattr(orchestrator_module, "triage_article", failing_triage)
+    monkeypatch.setattr(
+        orchestrator_module,
+        "extract_claims_and_perspectives",
+        lambda client, full_text, source_name: ExtractionResult(
+            items=[
+                ExtractedItem(
+                    text="A claim", supporting_excerpt="quote", item_type="factual",
+                    category="AppSec", llm_certainty=0.9,
+                ),
+            ]
+        ),
+    )
+
+    # must not raise: the re-checked entry's extraction call succeeded on the same client,
+    # proving the client itself is not broken — only the "New" entry's triage call failed
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+
+    assert summary["claims_extracted"] == 1
+    conn.close()
+
+
+def test_run_ingest_raises_when_the_only_calls_this_run_are_failing_extractions(
+    tmp_path, monkeypatch
+):
+    """If a feed's only entries are already-seen, in-window re-checks, triage is never
+    attempted at all — extraction is the *only* Anthropic call the run makes. A genuinely
+    broken client must still be detected in that steady state, not just when triage runs."""
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+    conn.execute(
+        "INSERT INTO articles (source_id, url, title, full_text, content_hash, "
+        "published_at, retrieved_at, previous_version_id) "
+        "VALUES (1, 'https://s.example/recent', 'Recent', 'old text', ?, NULL, ?, NULL)",
+        (_hash_content("old text"), datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+    entry = FetchedEntry(url="https://s.example/recent", title="Recent", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "new text")
+
+    def never_called_triage(client, title, summary, source_category):
+        raise AssertionError("triage must not be called for an already-seen entry")
+
+    monkeypatch.setattr(orchestrator_module, "triage_article", never_called_triage)
+
+    def failing_extraction(client, full_text, source_name):
+        raise RuntimeError("401 authentication_error: invalid x-api-key")
+
+    monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", failing_extraction)
+
+    with pytest.raises(RuntimeError, match="every Anthropic API call failed"):
+        run_ingest(conn, client=None, sleep=_no_sleep)
     conn.close()
 
 
