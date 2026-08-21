@@ -1,6 +1,8 @@
 import sqlite3
 from datetime import datetime, timezone
 
+import pytest
+
 import tabs.ingest.orchestrator as orchestrator_module
 from tabs.curate.models import ExtractedItem, ExtractionResult, TriageResult
 from tabs.db import get_connection, init_db
@@ -488,6 +490,142 @@ def test_run_ingest_continues_when_extraction_returns_no_parsed_output(tmp_path,
     ]
     assert any("extraction returned no parsed output" in message for message in messages)
     assert not any("curation store failed" in message for message in messages)
+    conn.close()
+
+
+def test_run_ingest_raises_when_every_triage_call_fails(tmp_path, monkeypatch):
+    """anthropic.Anthropic() does not validate credentials until the first request, so a
+    missing/invalid ANTHROPIC_API_KEY fails every triage call individually — each caught
+    and logged by the per-article guard — and the run would otherwise exit 0 reporting
+    articles_stored=0. A cron job would report success forever while doing nothing."""
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    entries = [
+        FetchedEntry(url="https://s.example/a", title="A", published_at=None, summary="s"),
+        FetchedEntry(url="https://s.example/b", title="B", published_at=None, summary="s"),
+    ]
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: entries)
+
+    def always_failing_triage(client, title, summary, source_category):
+        raise RuntimeError("401 authentication_error: invalid x-api-key")
+
+    monkeypatch.setattr(orchestrator_module, "triage_article", always_failing_triage)
+    monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", _no_extraction)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
+
+    with pytest.raises(RuntimeError, match="every triage call failed"):
+        run_ingest(conn, client=None, sleep=_no_sleep)
+
+    # the run-completion row is still written before the failure is raised: the run did
+    # happen, and its per-article error rows need the run-scoped row for context
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM run_log WHERE source_id IS NULL"
+    ).fetchone()["n"] == 1
+    conn.close()
+
+
+def test_run_ingest_raises_when_every_triage_call_returns_no_parsed_output(tmp_path, monkeypatch):
+    """A total refusal streak is as much a broken run as a total exception streak."""
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    entry = FetchedEntry(url="https://s.example/a", title="A", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    monkeypatch.setattr(
+        orchestrator_module,
+        "triage_article",
+        lambda client, title, summary, source_category: None,
+    )
+    monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", _no_extraction)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
+
+    with pytest.raises(RuntimeError, match="every triage call failed"):
+        run_ingest(conn, client=None, sleep=_no_sleep)
+    conn.close()
+
+
+def test_run_ingest_does_not_raise_when_only_some_triage_calls_fail(tmp_path, monkeypatch):
+    """Only a *total* failure means a broken client/key — partial failure is normal."""
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    entries = [
+        FetchedEntry(url="https://s.example/bad", title="Bad", published_at=None, summary="s"),
+        FetchedEntry(url="https://s.example/good", title="Good", published_at=None, summary="s"),
+    ]
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: entries)
+
+    def mixed_triage(client, title, summary, source_category):
+        if title == "Bad":
+            raise RuntimeError("simulated triage failure")
+        return TriageResult(in_scope=True, category="AppSec")
+
+    monkeypatch.setattr(orchestrator_module, "triage_article", mixed_triage)
+    monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", _no_extraction)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
+
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)  # must not raise
+
+    assert summary["articles_stored"] == 1
+    conn.close()
+
+
+def test_run_ingest_does_not_raise_when_triage_is_never_attempted(tmp_path, monkeypatch):
+    """Zero attempts is not zero successes out of N — an empty feed is not a broken key."""
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [])
+
+    def never_called_triage(client, title, summary, source_category):
+        raise AssertionError("triage must not be called for an empty feed")
+
+    monkeypatch.setattr(orchestrator_module, "triage_article", never_called_triage)
+
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)  # must not raise
+
+    assert summary["articles_stored"] == 0
+    assert summary["sources_ok"] == 1
+    conn.close()
+
+
+def test_run_ingest_does_not_raise_when_all_triage_calls_succeed(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    entry = FetchedEntry(url="https://s.example/a", title="A", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    _install_default_curation_stubs(monkeypatch)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
+
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)  # must not raise
+
+    assert summary["articles_stored"] == 1
+    conn.close()
+
+
+def test_run_ingest_does_not_raise_when_all_triage_calls_succeed_as_out_of_scope(tmp_path, monkeypatch):
+    """An in-scope=False verdict is a triage *success* — the API answered."""
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    entry = FetchedEntry(url="https://s.example/a", title="A", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    monkeypatch.setattr(
+        orchestrator_module,
+        "triage_article",
+        lambda client, title, summary, source_category: TriageResult(in_scope=False),
+    )
+
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)  # must not raise
+
+    assert summary["articles_out_of_scope"] == 1
     conn.close()
 
 

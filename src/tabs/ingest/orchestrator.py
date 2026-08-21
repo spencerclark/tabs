@@ -35,6 +35,10 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
         "perspectives_extracted": 0,
     }
     any_article_fetched = False
+    # Tracked outside `summary` (which is the operator-facing report) purely to detect a
+    # wholly broken Anthropic client at the end of the run — see the check after the loop.
+    triage_attempts = 0
+    triage_failures = 0
     run_started_at = datetime.now(timezone.utc).isoformat()
 
     sources = conn.execute("SELECT id, name, category, feed_url FROM sources").fetchall()
@@ -52,9 +56,11 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
             if already_seen and entry.url not in recheck_urls:
                 continue  # older article, already ingested, outside the re-check window
 
+            triage_attempts += 1
             try:
                 triage_result = triage_article(client, entry.title, entry.summary, source["category"])
             except Exception as exc:  # noqa: BLE001 — one bad article must not kill the run
+                triage_failures += 1
                 _log_run(
                     conn, source["id"], "error",
                     f"triage failed: {entry.url}: {type(exc).__name__}: {exc}",
@@ -65,6 +71,7 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
             # corpus of exploit/malware/CVE news). That is not an exception, so it slips
             # past the guard above — check it before dereferencing .in_scope.
             if triage_result is None:
+                triage_failures += 1
                 _log_run(
                     conn, source["id"], "error",
                     f"triage returned no parsed output (likely a model refusal): {entry.url}",
@@ -146,7 +153,23 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
         _record_success(conn, source["id"])
         summary["sources_ok"] += 1
 
+    # Recorded before the all-failed check below so the audit trail still shows the run
+    # happened — the per-article error rows need that run-scoped row for context.
     _record_run_completed(conn, run_started_at, summary)
+
+    # anthropic.Anthropic() validates nothing at construction time, only at first request.
+    # A missing or invalid key therefore fails every triage call individually, each one
+    # caught and logged by the per-article guard, leaving a run that exits 0 reporting
+    # articles_stored=0 — a cron job would report success forever while doing nothing.
+    # A total failure streak is the signal that the client itself, not the content, is
+    # broken; a partial one is normal and must not trip this.
+    if triage_attempts > 0 and triage_failures == triage_attempts:
+        raise RuntimeError(
+            "every triage call failed this run "
+            f"({triage_failures}/{triage_attempts}) — "
+            "check ANTHROPIC_API_KEY and Anthropic API status"
+        )
+
     return summary
 
 
