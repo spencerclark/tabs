@@ -3,8 +3,15 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 from html import unescape
+from urllib.parse import urlparse
 
 import requests
+
+ALLOWED_URL_SCHEMES = ("http", "https")
+MAX_ARTICLE_BYTES = 10 * 1024 * 1024
+CHUNK_BYTES = 65536
+REQUEST_TIMEOUT_SECONDS = 10
+USER_AGENT = "tabs-ingest/0.1 (+https://github.com/tabs-kb/tabs)"
 
 # Minimal, dependency-free HTML -> text extraction. This is deliberately not
 # publication-quality extraction; its job is to remove the dominant sources of
@@ -33,9 +40,39 @@ def _hash_content(text: str) -> str:
 
 
 def fetch_article_text(url: str, http_get=requests.get) -> str:
-    response = http_get(url, timeout=10)
-    response.raise_for_status()
-    return _extract_text(response.text)
+    """Fetch an article URL and return its normalized visible text.
+
+    Allowlisted sources are treated as potentially hostile (SPEC §6.5), so the URL
+    scheme is validated and the response body is read under a hard size cap instead of
+    being buffered unbounded. NOTE: this is not full SSRF protection — hostnames are
+    not resolved and private/link-local address ranges are not blocked; that is a
+    deliberate residual risk deferred to a later hardening pass.
+    """
+    if urlparse(url).scheme.lower() not in ALLOWED_URL_SCHEMES:
+        raise ValueError(f"refusing to fetch non-http(s) URL: {url!r}")
+
+    response = http_get(
+        url,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        headers={"User-Agent": USER_AGENT},
+        stream=True,
+    )
+    try:
+        response.raise_for_status()
+        body = bytearray()
+        for chunk in response.iter_content(chunk_size=CHUNK_BYTES):
+            if not chunk:
+                continue
+            body.extend(chunk)
+            if len(body) > MAX_ARTICLE_BYTES:
+                raise ValueError(
+                    f"response body exceeds {MAX_ARTICLE_BYTES} byte cap: {url!r}"
+                )
+    finally:
+        response.close()
+
+    encoding = getattr(response, "encoding", None) or "utf-8"
+    return _extract_text(bytes(body).decode(encoding, errors="replace"))
 
 
 def store_article(

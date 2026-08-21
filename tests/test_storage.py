@@ -1,5 +1,78 @@
+import pytest
+
 from tabs.db import get_connection, init_db
-from tabs.ingest.storage import _extract_text, store_article
+from tabs.ingest.storage import (
+    MAX_ARTICLE_BYTES,
+    USER_AGENT,
+    _extract_text,
+    fetch_article_text,
+    store_article,
+)
+
+
+class FakeResponse:
+    """Minimal stand-in for requests.Response as fetch_article_text uses it."""
+
+    def __init__(self, chunks: list[bytes], encoding: str = "utf-8", status_error=None):
+        self._chunks = chunks
+        self.encoding = encoding
+        self._status_error = status_error
+        self.closed = False
+
+    def raise_for_status(self):
+        if self._status_error is not None:
+            raise self._status_error
+
+    def iter_content(self, chunk_size: int):
+        yield from self._chunks
+
+    def close(self):
+        self.closed = True
+
+
+def test_fetch_article_text_returns_extracted_text_and_sends_a_user_agent():
+    captured = {}
+    body = b"<html><body><script>x=1</script><p>Hello  world</p></body></html>"
+
+    def fake_get(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return FakeResponse([body])
+
+    assert fetch_article_text("https://s.example/a", http_get=fake_get) == "Hello world"
+    assert captured["url"] == "https://s.example/a"
+    assert captured["kwargs"]["headers"]["User-Agent"] == USER_AGENT
+    assert captured["kwargs"]["stream"] is True
+    assert captured["kwargs"]["timeout"] == 10
+
+
+def test_fetch_article_text_rejects_non_http_schemes():
+    def fake_get(url, **kwargs):  # pragma: no cover - must never be reached
+        raise AssertionError(f"must not fetch {url}")
+
+    for url in ("file:///etc/passwd", "ftp://s.example/a", "gopher://s.example/a", "not-a-url"):
+        with pytest.raises(ValueError):
+            fetch_article_text(url, http_get=fake_get)
+
+
+def test_fetch_article_text_rejects_bodies_over_the_size_cap():
+    oversized = [b"a" * 65536] * ((MAX_ARTICLE_BYTES // 65536) + 2)
+    response = FakeResponse(oversized)
+
+    with pytest.raises(ValueError, match="exceeds"):
+        fetch_article_text("https://s.example/big", http_get=lambda url, **kw: response)
+
+    assert response.closed is True
+
+
+def test_fetch_article_text_accepts_a_body_at_the_size_cap():
+    chunks = [b"x" * 1024] * ((MAX_ARTICLE_BYTES // 1024) - 1)
+
+    text = fetch_article_text(
+        "https://s.example/ok", http_get=lambda url, **kw: FakeResponse(chunks)
+    )
+
+    assert len(text) == MAX_ARTICLE_BYTES - 1024
 
 
 def test_extract_text_strips_script_and_style_blocks_with_their_content():
