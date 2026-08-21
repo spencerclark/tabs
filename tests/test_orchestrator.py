@@ -17,6 +17,48 @@ def _insert_source(conn, name, feed_url):
     conn.commit()
 
 
+def _no_sleep(seconds):
+    """Stand-in for the injected rate-limit delay, so tests never actually sleep."""
+
+
+def test_run_ingest_delays_between_article_fetches_but_not_before_the_first(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source A", "https://a.example/feed")
+    _insert_source(conn, "Source B", "https://b.example/feed")
+
+    entries_a = [
+        FetchedEntry(url="https://a.example/1", title="1", published_at=None, summary="s"),
+        FetchedEntry(url="https://a.example/2", title="2", published_at=None, summary="s"),
+    ]
+    entry_b = FetchedEntry(url="https://b.example/1", title="1", published_at=None, summary="s")
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "fetch_feed",
+        lambda feed_url: entries_a if feed_url == "https://a.example/feed" else [entry_b],
+    )
+
+    calls = []
+    monkeypatch.setattr(
+        orchestrator_module,
+        "fetch_article_text",
+        lambda url: calls.append(("fetch", url)) or "text for " + url,
+    )
+
+    run_ingest(conn, sleep=lambda seconds: calls.append(("sleep", seconds)))
+
+    # three article fetches, two delays: never before the first request of the run
+    assert calls == [
+        ("fetch", "https://a.example/1"),
+        ("sleep", orchestrator_module.ARTICLE_REQUEST_DELAY_SECONDS),
+        ("fetch", "https://a.example/2"),
+        ("sleep", orchestrator_module.ARTICLE_REQUEST_DELAY_SECONDS),
+        ("fetch", "https://b.example/1"),
+    ]
+    conn.close()
+
+
 def test_run_ingest_stores_articles_and_records_success(tmp_path, monkeypatch):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
@@ -26,7 +68,7 @@ def test_run_ingest_stores_articles_and_records_success(tmp_path, monkeypatch):
     monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
-    summary = run_ingest(conn)
+    summary = run_ingest(conn, sleep=_no_sleep)
 
     assert summary == {"sources_ok": 1, "sources_failed": 0, "articles_stored": 1}
     source_row = conn.execute("SELECT consecutive_failures, last_successful_fetch_at FROM sources").fetchone()
@@ -53,7 +95,7 @@ def test_run_ingest_skips_failing_source_and_continues(tmp_path, monkeypatch):
     monkeypatch.setattr(orchestrator_module, "fetch_feed", fake_fetch_feed)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
-    summary = run_ingest(conn)
+    summary = run_ingest(conn, sleep=_no_sleep)
 
     assert summary == {"sources_ok": 1, "sources_failed": 1, "articles_stored": 1}
     bad_row = conn.execute(
@@ -86,7 +128,7 @@ def test_run_ingest_skips_previously_ingested_urls_outside_recheck_window(tmp_pa
         lambda url: fetch_calls.append(url) or "text",
     )
 
-    summary = run_ingest(conn)
+    summary = run_ingest(conn, sleep=_no_sleep)
 
     assert fetch_calls == []  # old article, outside the 14-day re-check window: not re-fetched
     assert summary["articles_stored"] == 0
@@ -119,7 +161,7 @@ def test_run_ingest_refetches_previously_ingested_urls_inside_recheck_window(tmp
         lambda url: fetch_calls.append(url) or "text",
     )
 
-    summary = run_ingest(conn)
+    summary = run_ingest(conn, sleep=_no_sleep)
 
     # recent article, inside the 14-day re-check window: must be re-fetched to detect edits/retractions
     assert fetch_calls == ["https://s.example/recent"]
@@ -145,7 +187,7 @@ def test_run_ingest_stores_new_version_when_recheck_finds_changed_content(tmp_pa
     monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [recent_entry])
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "new text")
 
-    summary = run_ingest(conn)
+    summary = run_ingest(conn, sleep=_no_sleep)
 
     assert summary["articles_stored"] == 1
     rows = conn.execute("SELECT id, previous_version_id FROM articles ORDER BY id").fetchall()
@@ -167,8 +209,8 @@ def test_run_ingest_reports_zero_stored_on_second_run_over_unchanged_content(tmp
         lambda url: "<html><body><p>Same   article body.</p></body></html>",
     )
 
-    first = run_ingest(conn)
-    second = run_ingest(conn)
+    first = run_ingest(conn, sleep=_no_sleep)
+    second = run_ingest(conn, sleep=_no_sleep)
 
     assert first["articles_stored"] == 1
     # the article is inside the re-check window and is re-fetched, but the content is
@@ -207,7 +249,7 @@ def test_run_ingest_continues_when_store_article_fails_for_one_entry(tmp_path, m
 
     monkeypatch.setattr(orchestrator_module, "store_article", fake_store_article)
 
-    summary = run_ingest(conn)
+    summary = run_ingest(conn, sleep=_no_sleep)
 
     # the failing store must not abort the run: the second entry in source A and all of
     # source B must still be processed.

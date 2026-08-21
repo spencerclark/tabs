@@ -1,15 +1,20 @@
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 
-from tabs.ingest.fetch import FeedFetchError, fetch_feed
+from tabs.ingest.fetch import REQUEST_DELAY_SECONDS, FeedFetchError, fetch_feed
 from tabs.ingest.storage import fetch_article_text, store_article
 
 RECENT_ARTICLE_WINDOW_DAYS = 14
+# SPEC §5.2: requests are rate-limited with a small delay between them. A feed yields
+# many article fetches, so the per-entry loop needs the same delay fetch_feed applies.
+ARTICLE_REQUEST_DELAY_SECONDS = REQUEST_DELAY_SECONDS
 
 
-def run_ingest(conn: sqlite3.Connection) -> dict:
+def run_ingest(conn: sqlite3.Connection, sleep=time.sleep) -> dict:
     """Run one ingestion pass over every allowlisted source. Returns a summary dict."""
     summary = {"sources_ok": 0, "sources_failed": 0, "articles_stored": 0}
+    any_article_fetched = False
 
     sources = conn.execute("SELECT id, feed_url FROM sources").fetchall()
     for source in sources:
@@ -26,10 +31,19 @@ def run_ingest(conn: sqlite3.Connection) -> dict:
             if already_seen and entry.url not in recheck_urls:
                 continue  # older article, already ingested, outside the re-check window
 
+            if any_article_fetched:  # no delay before the very first request of the run
+                sleep(ARTICLE_REQUEST_DELAY_SECONDS)
+            any_article_fetched = True
+
             try:
                 full_text = fetch_article_text(entry.url)
             except Exception as exc:  # noqa: BLE001 — one bad article must not kill the run
-                _log_run(conn, source["id"], "error", f"article fetch failed: {entry.url}: {exc}")
+                _log_run(
+                    conn,
+                    source["id"],
+                    "error",
+                    f"article fetch failed: {entry.url}: {type(exc).__name__}: {exc}",
+                )
                 continue
 
             try:
@@ -37,7 +51,12 @@ def run_ingest(conn: sqlite3.Connection) -> dict:
                     conn, source["id"], entry.url, entry.title, entry.published_at, full_text
                 )
             except Exception as exc:  # noqa: BLE001 — one bad article must not kill the run
-                _log_run(conn, source["id"], "error", f"article store failed: {entry.url}: {exc}")
+                _log_run(
+                    conn,
+                    source["id"],
+                    "error",
+                    f"article store failed: {entry.url}: {type(exc).__name__}: {exc}",
+                )
                 continue
             if created:  # unchanged re-fetches must not be counted as newly stored
                 summary["articles_stored"] += 1
