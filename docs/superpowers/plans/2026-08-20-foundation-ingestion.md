@@ -13,7 +13,7 @@
 (Copied from `SPEC.md`; apply to every task below.)
 
 - Allowlist-only sourcing — the system never adds a source on its own; `sources.yaml` is the only way a source enters the system (SPEC §3.1, §5.1).
-- Every stored article/claim/perspective carries mandatory attribution: source, URL, author (nullable), `published_at`, `retrieved_at` (SPEC §4.6).
+- Every stored claim/perspective record carries mandatory attribution: `source_id`, `article_url`, author (nullable), `published_at`, `retrieved_at` (SPEC §4.6) — this applies to claims/perspectives, not to the `articles` table itself, which has its own fields (`source_id`, `url`, `published_at`, `retrieved_at`; no `author` column) per SPEC §4.5. Claims/perspectives reference articles via `article_id` (normalized FK) rather than duplicating `article_url` as a column — the URL is retrievable via a join to `articles.url`.
 - Transient fetch failures (network errors, 5xx, rate limits) retry with exponential backoff, then are skipped and logged — one failing source must never abort the rest of the run (SPEC §5.4).
 - Per-source consecutive failure streaks are tracked separately from the per-run transient log, so a persistently broken feed is visible as "needs attention" (SPEC §5.4).
 - Articles ingested within the last 14 days are re-fetched each run to detect edits/retractions; older articles are not re-fetched (SPEC §5.3).
