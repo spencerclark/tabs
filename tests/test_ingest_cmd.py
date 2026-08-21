@@ -2,6 +2,7 @@ from click.testing import CliRunner
 
 import tabs.commands.ingest_cmd as ingest_cmd_module
 from tabs.cli import main
+from tabs.db import get_connection
 
 
 def test_ingest_command_syncs_sources_and_runs_ingest(tmp_path, monkeypatch):
@@ -28,3 +29,18 @@ def test_ingest_command_syncs_sources_and_runs_ingest(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert "articles_stored=3" in result.output
+
+    # Verify that the source was actually synced to the database
+    conn = get_connection(db_path)
+    source_row = conn.execute("SELECT COUNT(*) AS n FROM sources").fetchone()
+    assert source_row["n"] == 1
+    synced_source = conn.execute(
+        "SELECT name, feed_url, category, institutional_tier FROM sources WHERE feed_url = ?",
+        ("https://test.example/feed",),
+    ).fetchone()
+    assert synced_source is not None
+    assert synced_source["name"] == "Test Source"
+    assert synced_source["feed_url"] == "https://test.example/feed"
+    assert synced_source["category"] == "AppSec"
+    assert synced_source["institutional_tier"] == 2
+    conn.close()
