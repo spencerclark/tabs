@@ -5,6 +5,12 @@ from tabs.curate.prompting import wrap_untrusted
 
 TRIAGE_MODEL = "claude-haiku-4-5"
 
+# Feed titles/summaries are normally short, but feedparser applies no size cap on them, so a
+# hostile or broken feed could ship a multi-megabyte <summary>. That would be unbounded cost
+# on every fetched entry (triage runs before the recheck/in-scope gates narrow anything down)
+# and risks a hard context-limit failure — mirrors extraction.py's MAX_EXTRACTION_CHARS guard.
+MAX_TRIAGE_CHARS = 4_000
+
 _SYSTEM_PROMPT = (
     "You triage security news articles for a knowledge base that tracks "
     "Application Security and AI Security. You are given an article's title "
@@ -37,8 +43,16 @@ def triage_article(
     The title and summary come straight from a third-party feed and are wrapped with
     ``wrap_untrusted`` so a crafted <title> containing a literal closing tag cannot break
     out of the delimited block and have the rest of its text read as trusted prompt.
+
+    Raises ValueError for a combined title+summary over ``MAX_TRIAGE_CHARS`` rather than
+    sending the request; the orchestrator's per-article triage guard logs it distinctly
+    from a generic API failure.
     """
-    article_block = wrap_untrusted("article", f"Title: {title}\nSummary: {summary}")
+    combined = f"Title: {title}\nSummary: {summary}"
+    if len(combined) > MAX_TRIAGE_CHARS:
+        raise ValueError(f"feed entry text too long for triage: {len(combined)} chars")
+
+    article_block = wrap_untrusted("article", combined)
     user_content = (
         f"Source's own category tag (a hint, not authoritative): {source_category}\n\n"
         f"{article_block}"

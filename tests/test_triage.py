@@ -1,7 +1,9 @@
 import re
 
+import pytest
+
 from tabs.curate.models import TriageResult
-from tabs.curate.triage import TRIAGE_MODEL, triage_article
+from tabs.curate.triage import MAX_TRIAGE_CHARS, TRIAGE_MODEL, triage_article
 
 
 class _FakeParseResponse:
@@ -31,6 +33,29 @@ def test_triage_article_returns_the_parsed_result():
 
     assert result.in_scope is True
     assert result.category == "AI Security"
+
+
+def test_triage_article_rejects_oversized_input_before_calling_the_api():
+    """feedparser applies no size cap on title/summary, so a hostile or broken feed could
+    ship an oversized entry — refuse locally instead of paying to find out, and instead of
+    letting it be the run's sole Anthropic call and trip the all-calls-failed check."""
+    client = _FakeClient(TriageResult(in_scope=False))
+
+    with pytest.raises(ValueError, match="feed entry text too long for triage"):
+        triage_article(client, "x" * MAX_TRIAGE_CHARS, "summary", "AppSec")
+
+    assert client.messages.calls == []
+
+
+def test_triage_article_accepts_input_at_the_length_cap():
+    client = _FakeClient(TriageResult(in_scope=False))
+
+    # "Title: " + "Summary: " prefixes push the combined length slightly over the cap
+    # unless the title itself is sized to land exactly at MAX_TRIAGE_CHARS combined.
+    title = "x" * (MAX_TRIAGE_CHARS - len("Title: \nSummary: "))
+    triage_article(client, title, "", "AppSec")
+
+    assert len(client.messages.calls) == 1
 
 
 def test_triage_article_uses_the_triage_model():
