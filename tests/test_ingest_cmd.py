@@ -23,7 +23,8 @@ def test_ingest_command_syncs_sources_and_runs_ingest(tmp_path, monkeypatch):
         "run_ingest",
         lambda conn, client: {
             "sources_ok": 1, "sources_failed": 0, "articles_stored": 3,
-            "articles_out_of_scope": 1, "claims_extracted": 5, "perspectives_extracted": 2,
+            "articles_out_of_scope": 1, "articles_uncurated": 4,
+            "claims_extracted": 5, "perspectives_extracted": 2,
         },
     )
 
@@ -36,6 +37,7 @@ def test_ingest_command_syncs_sources_and_runs_ingest(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "articles_stored=3" in result.output
     assert "articles_out_of_scope=1" in result.output
+    assert "articles_uncurated=4" in result.output
     assert "claims_extracted=5" in result.output
     assert "perspectives_extracted=2" in result.output
 
@@ -142,7 +144,8 @@ def test_ingest_command_constructs_and_passes_an_anthropic_client(tmp_path, monk
         received["client"] = client
         return {
             "sources_ok": 0, "sources_failed": 0, "articles_stored": 0,
-            "articles_out_of_scope": 0, "claims_extracted": 0, "perspectives_extracted": 0,
+            "articles_out_of_scope": 0, "articles_uncurated": 0,
+            "claims_extracted": 0, "perspectives_extracted": 0,
         }
 
     monkeypatch.setattr(ingest_cmd_module, "run_ingest", fake_run_ingest)

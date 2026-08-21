@@ -24,6 +24,13 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
         "sources_failed": 0,
         "articles_stored": 0,
         "articles_out_of_scope": 0,
+        # Articles stored (content_hash committed) whose curation produced nothing. These
+        # are permanently skipped on later runs — store_article will report the unchanged
+        # content as already-curated — so without this counter the loss is invisible. A
+        # real fix (a curation_status column and a retry path) is deferred; this is the
+        # visibility half. Out-of-scope articles are NOT counted here: that is an
+        # intentional skip, already reported as articles_out_of_scope.
+        "articles_uncurated": 0,
         "claims_extracted": 0,
         "perspectives_extracted": 0,
     }
@@ -103,6 +110,7 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
                     conn, source["id"], "error",
                     f"extraction failed: {entry.url}: {type(exc).__name__}: {exc}",
                 )
+                summary["articles_uncurated"] += 1
                 continue
 
             # as with triage: a refusal yields None, not an exception. Without this check
@@ -112,6 +120,7 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
                     conn, source["id"], "error",
                     f"extraction returned no parsed output (likely a model refusal): {entry.url}",
                 )
+                summary["articles_uncurated"] += 1
                 continue
 
             try:
@@ -129,6 +138,7 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
                     conn, source["id"], "error",
                     f"curation store failed: {entry.url}: {type(exc).__name__}: {exc}",
                 )
+                summary["articles_uncurated"] += 1
                 continue
             summary["claims_extracted"] += counts["claims_created"]
             summary["perspectives_extracted"] += counts["perspectives_created"]

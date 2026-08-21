@@ -40,7 +40,8 @@ def _install_default_curation_stubs(monkeypatch):
 
 
 DEFAULT_SUMMARY_EXTRAS = {
-    "articles_out_of_scope": 0, "claims_extracted": 0, "perspectives_extracted": 0,
+    "articles_out_of_scope": 0, "articles_uncurated": 0,
+    "claims_extracted": 0, "perspectives_extracted": 0,
 }
 
 
@@ -374,7 +375,8 @@ def test_run_ingest_skips_out_of_scope_articles_without_fetching_them(tmp_path, 
     assert fetch_calls == []
     assert summary == {
         "sources_ok": 1, "sources_failed": 0, "articles_stored": 0,
-        "articles_out_of_scope": 1, "claims_extracted": 0, "perspectives_extracted": 0,
+        "articles_out_of_scope": 1, "articles_uncurated": 0,
+        "claims_extracted": 0, "perspectives_extracted": 0,
     }
     assert conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"] == 0
     conn.close()
@@ -479,6 +481,7 @@ def test_run_ingest_continues_when_extraction_returns_no_parsed_output(tmp_path,
     assert summary["articles_stored"] == 1
     assert summary["claims_extracted"] == 0
     assert summary["perspectives_extracted"] == 0
+    assert summary["articles_uncurated"] == 1
     messages = [
         row["message"]
         for row in conn.execute("SELECT message FROM run_log WHERE status = 'error'").fetchall()
@@ -589,6 +592,8 @@ def test_run_ingest_continues_when_extraction_fails_for_one_entry(tmp_path, monk
     # the article itself is still stored — only its curation failed
     assert summary["articles_stored"] == 1
     assert summary["claims_extracted"] == 0
+    # ...and that silent permanent skip is reported rather than left invisible
+    assert summary["articles_uncurated"] == 1
     error_rows = conn.execute(
         "SELECT message FROM run_log WHERE status = 'error'"
     ).fetchall()
@@ -634,6 +639,7 @@ def test_run_ingest_rolls_back_partial_curation_writes_when_the_store_fails(tmp_
     # error-logging path that follows it
     assert conn.execute("SELECT COUNT(*) AS n FROM claims").fetchone()["n"] == 0
     assert summary["claims_extracted"] == 0
+    assert summary["articles_uncurated"] == 1
     # ...and the run still continued through the second entry
     assert len(store_calls) == 2
     assert summary["articles_stored"] == 2
@@ -683,7 +689,11 @@ def test_run_ingest_continues_when_curation_store_fails_for_one_entry(tmp_path, 
     # curation-storage step failed, so claims/perspectives stay at 0 for it (as they do
     # for the others, since _no_extraction never produces any).
     assert summary == {
-        "sources_ok": 2, "sources_failed": 0, "articles_stored": 3, **DEFAULT_SUMMARY_EXTRAS,
+        "sources_ok": 2, "sources_failed": 0, "articles_stored": 3,
+        **DEFAULT_SUMMARY_EXTRAS,
+        # bad_entry was stored but never curated — it will look "already curated,
+        # unchanged" on every future run, so it is surfaced here
+        "articles_uncurated": 1,
     }
     error_rows = conn.execute(
         "SELECT message FROM run_log WHERE status = 'error'"

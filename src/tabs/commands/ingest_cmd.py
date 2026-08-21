@@ -31,6 +31,7 @@ def ingest_cmd(ctx: click.Context, sources_path: Path) -> None:
             f"sources_failed={summary['sources_failed']} "
             f"articles_stored={summary['articles_stored']} "
             f"articles_out_of_scope={summary['articles_out_of_scope']} "
+            f"articles_uncurated={summary['articles_uncurated']} "
             f"claims_extracted={summary['claims_extracted']} "
             f"perspectives_extracted={summary['perspectives_extracted']}"
         )
