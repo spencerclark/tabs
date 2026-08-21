@@ -29,6 +29,7 @@ def test_fetch_feed_returns_entries_on_success(monkeypatch):
 
 def test_fetch_feed_retries_then_succeeds(monkeypatch):
     calls = {"count": 0}
+    sleep_calls = []
 
     def fake_parse(url):
         calls["count"] += 1
@@ -40,14 +41,26 @@ def test_fetch_feed_retries_then_succeeds(monkeypatch):
 
     monkeypatch.setattr(feedparser, "parse", fake_parse)
 
-    entries = fetch_feed("https://example.com/feed.xml", sleep=lambda s: None)
+    entries = fetch_feed("https://example.com/feed.xml", sleep=sleep_calls.append)
 
     assert calls["count"] == 2
     assert len(entries) == 1
+    # Verify backoff values: first retry should sleep 2 * (2**0) = 2 seconds
+    assert sleep_calls[0] == 2  # Backoff on first failure
+    assert sleep_calls[1] == 1  # REQUEST_DELAY_SECONDS on success
 
 
 def test_fetch_feed_raises_after_exhausting_retries(monkeypatch):
-    monkeypatch.setattr(feedparser, "parse", lambda url: _make_parsed(True, []))
+    calls = {"count": 0}
+
+    def fake_parse(url):
+        calls["count"] += 1
+        return _make_parsed(True, [])
+
+    monkeypatch.setattr(feedparser, "parse", fake_parse)
 
     with pytest.raises(FeedFetchError):
         fetch_feed("https://example.com/feed.xml", sleep=lambda s: None)
+
+    # Verify exactly 3 calls to parse were made (MAX_RETRIES)
+    assert calls["count"] == 3
