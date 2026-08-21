@@ -131,10 +131,21 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
                 continue  # unchanged content: already curated on a previous run
             summary["articles_stored"] += 1
 
-            llm_attempts += 1
             try:
                 extraction_result = extract_claims_and_perspectives(client, full_text, source["name"])
+            except ValueError as exc:
+                # a local pre-flight rejection (article text over MAX_EXTRACTION_CHARS) —
+                # the request was never sent, so it must not count toward the run-health
+                # check's attempt/failure tally, or an oversized article could make a quiet
+                # run falsely report "every Anthropic API call failed".
+                _log_run(
+                    conn, source["id"], "error",
+                    f"extraction input rejected: {entry.url}: {exc}",
+                )
+                summary["articles_uncurated"] += 1
+                continue
             except Exception as exc:  # noqa: BLE001 — one bad article must not kill the run
+                llm_attempts += 1
                 llm_failures += 1
                 if first_llm_error is None:
                     first_llm_error = f"{type(exc).__name__}: {exc}"
@@ -145,6 +156,7 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
                 summary["articles_uncurated"] += 1
                 continue
 
+            llm_attempts += 1
             # as with triage: a refusal yields None, not an exception. Without this check
             # it reaches store_extraction_result and is mislabeled "curation store failed".
             if extraction_result is None:

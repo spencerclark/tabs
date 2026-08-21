@@ -760,8 +760,15 @@ def test_run_ingest_raises_when_the_only_calls_this_run_are_failing_extractions(
     monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "new text")
 
+    # Recorded rather than raised-on-call: the orchestrator's broad `except Exception`
+    # around the triage call would silently swallow a raised AssertionError here, making
+    # that form of guard unable to actually fail the test if the "skip triage for
+    # already-seen entries" gate ever regressed.
+    triage_calls = []
+
     def never_called_triage(client, title, summary, source_category):
-        raise AssertionError("triage must not be called for an already-seen entry")
+        triage_calls.append(title)
+        return TriageResult(in_scope=True, category="AppSec")
 
     monkeypatch.setattr(orchestrator_module, "triage_article", never_called_triage)
 
@@ -772,6 +779,59 @@ def test_run_ingest_raises_when_the_only_calls_this_run_are_failing_extractions(
 
     with pytest.raises(RuntimeError, match="every Anthropic API call failed"):
         run_ingest(conn, client=None, sleep=_no_sleep)
+
+    assert triage_calls == []
+    conn.close()
+
+
+def test_run_ingest_does_not_raise_when_the_only_entry_is_rejected_for_being_oversized(
+    tmp_path, monkeypatch
+):
+    """extract_claims_and_perspectives raises ValueError locally, before any request, for
+    article text over MAX_EXTRACTION_CHARS. That is a pre-flight rejection, not a failed
+    Anthropic call. Using an already-seen re-check entry (which skips triage entirely, so
+    extraction is the run's *only* possible Anthropic call) isolates the case: without it, a
+    genuinely new entry's successful triage call would dilute the mutation this test targets
+    and let a regression pass unnoticed — the run must not falsely report "every Anthropic
+    API call failed" when zero API calls were ever attempted."""
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+    conn.execute(
+        "INSERT INTO articles (source_id, url, title, full_text, content_hash, "
+        "published_at, retrieved_at, previous_version_id) "
+        "VALUES (1, 'https://s.example/recent', 'Recent', 'old text', ?, NULL, ?, NULL)",
+        (_hash_content("old text"), datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+    entry = FetchedEntry(url="https://s.example/recent", title="Recent", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "new text")
+
+    triage_calls = []
+
+    def never_called_triage(client, title, summary, source_category):
+        triage_calls.append(title)
+        return TriageResult(in_scope=True, category="AppSec")
+
+    monkeypatch.setattr(orchestrator_module, "triage_article", never_called_triage)
+
+    def oversized_extraction(client, full_text, source_name):
+        raise ValueError("article text too long for extraction: 999999 chars")
+
+    monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", oversized_extraction)
+
+    # must not raise: the ValueError is a local rejection, not evidence the client is broken
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+
+    assert triage_calls == []
+    assert summary["articles_stored"] == 1
+    assert summary["articles_uncurated"] == 1
+    error_rows = conn.execute(
+        "SELECT message FROM run_log WHERE status = 'error'"
+    ).fetchall()
+    assert any("extraction input rejected" in row["message"] for row in error_rows)
     conn.close()
 
 
