@@ -1,6 +1,12 @@
 import re
 
-from tabs.curate.extraction import EXTRACTION_MODEL, extract_claims_and_perspectives
+import pytest
+
+from tabs.curate.extraction import (
+    EXTRACTION_MODEL,
+    MAX_EXTRACTION_CHARS,
+    extract_claims_and_perspectives,
+)
 from tabs.curate.models import ExtractedItem, ExtractionResult
 
 
@@ -45,6 +51,35 @@ def test_extract_claims_and_perspectives_returns_the_parsed_result():
     result = extract_claims_and_perspectives(client, "full article text", "Some Source")
 
     assert result == expected
+
+
+def test_extract_claims_and_perspectives_rejects_oversized_text_before_calling_the_api():
+    """An unbounded article body is both an unbounded per-call cost and a hard 400 if it
+    exceeds the context window — refuse locally instead of paying to find out."""
+    client = _FakeClient(ExtractionResult())
+
+    with pytest.raises(ValueError, match="article text too long for extraction"):
+        extract_claims_and_perspectives(client, "x" * (MAX_EXTRACTION_CHARS + 1), "Some Source")
+
+    assert client.messages.calls == []
+
+
+def test_extract_claims_and_perspectives_accepts_text_at_the_length_cap():
+    client = _FakeClient(ExtractionResult())
+
+    extract_claims_and_perspectives(client, "x" * MAX_EXTRACTION_CHARS, "Some Source")
+
+    assert len(client.messages.calls) == 1
+
+
+def test_extract_claims_and_perspectives_allows_room_for_a_full_schema_response():
+    """4096 output tokens truncates multi-item structured output, and a truncated
+    response fails schema parsing — which permanently skips the article."""
+    client = _FakeClient(ExtractionResult())
+
+    extract_claims_and_perspectives(client, "full article text", "Some Source")
+
+    assert client.messages.calls[0]["max_tokens"] >= 16000
 
 
 def test_extract_claims_and_perspectives_uses_the_extraction_model():

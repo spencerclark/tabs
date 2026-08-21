@@ -3,6 +3,18 @@ from tabs.curate.prompting import wrap_untrusted
 
 EXTRACTION_MODEL = "claude-sonnet-5"
 
+# The schema emits several items, each with text/supporting_excerpt/tags, so the output
+# budget has to fit a full multi-item response: on truncation the structured-output parse
+# fails on incomplete JSON and the article is skipped (permanently — see the orchestrator's
+# articles_uncurated counter). Output tokens are billed only when generated, so a generous
+# ceiling costs nothing on a typical article and removes the truncation cliff.
+MAX_EXTRACTION_TOKENS = 16000
+
+# The fetch layer caps a response body at 10MB, which is far more than any real article and
+# far more than is sensible to send to Sonnet. ~100k chars is roughly 25k tokens: generous
+# for any news article, well under the context window, and a bound on per-call cost.
+MAX_EXTRACTION_CHARS = 100_000
+
 _SYSTEM_PROMPT = (
     "You extract structured claims and perspectives from a security news "
     "article for a knowledge base covering Application Security and AI "
@@ -42,12 +54,19 @@ def extract_claims_and_perspectives(client, full_text: str, source_name: str) ->
     *after* stripping tags, which means a page can surface a literal "</article_content>"
     into full_text. The per-request nonce on the tag name makes that forged closing tag
     unable to match, so it cannot end the block and promote the text after it to trusted.
+
+    Raises ValueError for text over ``MAX_EXTRACTION_CHARS`` rather than sending the
+    request; the orchestrator's per-article extraction guard logs it distinctly from a
+    generic API failure.
     """
+    if len(full_text) > MAX_EXTRACTION_CHARS:
+        raise ValueError(f"article text too long for extraction: {len(full_text)} chars")
+
     article_block = wrap_untrusted("article_content", full_text)
     user_content = f"Source: {source_name}\n\n{article_block}"
     response = client.messages.parse(
         model=EXTRACTION_MODEL,
-        max_tokens=4096,
+        max_tokens=MAX_EXTRACTION_TOKENS,
         system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_content}],
         output_format=ExtractionResult,
