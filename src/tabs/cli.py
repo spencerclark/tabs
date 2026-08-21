@@ -3,6 +3,7 @@ from pathlib import Path
 import click
 
 from tabs import __version__
+from tabs.commands.sources_cmd import sources_cmd
 
 DEFAULT_DB_PATH = Path("data/tabs.db")
 
@@ -20,6 +21,9 @@ def main(ctx: click.Context, db_path: Path) -> None:
     """tabs — AppSec & AI Security knowledge base."""
     ctx.ensure_object(dict)
     ctx.obj["db_path"] = db_path
+
+
+main.add_command(sources_cmd)
 
 
 if __name__ == "__main__":
