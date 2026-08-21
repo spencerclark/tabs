@@ -1,7 +1,5 @@
 import re
 
-import pytest
-
 from tabs.curate.models import TriageResult
 from tabs.curate.triage import MAX_TRIAGE_CHARS, TRIAGE_MODEL, triage_article
 
@@ -35,16 +33,20 @@ def test_triage_article_returns_the_parsed_result():
     assert result.category == "AI Security"
 
 
-def test_triage_article_rejects_oversized_input_before_calling_the_api():
-    """feedparser applies no size cap on title/summary, so a hostile or broken feed could
-    ship an oversized entry — refuse locally instead of paying to find out, and instead of
-    letting it be the run's sole Anthropic call and trip the all-calls-failed check."""
+def test_triage_article_truncates_oversized_input_instead_of_rejecting_it():
+    """feedparser applies no size cap on title/summary, and some real feeds legitimately
+    ship long summaries (e.g. full-text blog entries) well past a few thousand characters.
+    Rejecting those would silently and permanently drop real entries from the knowledge
+    base; truncating still lets the call happen and judges relevance from the opening text.
+    A function that never raises for oversized input also can't have that miscounted as a
+    failed Anthropic call by the orchestrator's run-health check."""
     client = _FakeClient(TriageResult(in_scope=False))
 
-    with pytest.raises(ValueError, match="feed entry text too long for triage"):
-        triage_article(client, "x" * MAX_TRIAGE_CHARS, "summary", "AppSec")
+    triage_article(client, "x" * (MAX_TRIAGE_CHARS * 2), "summary", "AppSec")
 
-    assert client.messages.calls == []
+    assert len(client.messages.calls) == 1
+    user_content = client.messages.calls[0]["messages"][0]["content"]
+    assert len(user_content) < MAX_TRIAGE_CHARS * 2
 
 
 def test_triage_article_accepts_input_at_the_length_cap():

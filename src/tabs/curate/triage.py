@@ -7,8 +7,12 @@ TRIAGE_MODEL = "claude-haiku-4-5"
 
 # Feed titles/summaries are normally short, but feedparser applies no size cap on them, so a
 # hostile or broken feed could ship a multi-megabyte <summary>. That would be unbounded cost
-# on every fetched entry (triage runs before the recheck/in-scope gates narrow anything down)
-# and risks a hard context-limit failure — mirrors extraction.py's MAX_EXTRACTION_CHARS guard.
+# on every fetched entry (triage runs before the recheck/in-scope gates narrow anything down).
+# Unlike extraction.py's MAX_EXTRACTION_CHARS (which *rejects* oversized input, since losing
+# article content would corrupt the extraction), triage only needs to judge relevance, so
+# truncating is safe: some real feeds (e.g. full-text blog summaries) legitimately run well
+# past a few thousand characters, and rejecting those would silently and permanently drop
+# real entries from the knowledge base rather than just classify them from a truncated view.
 MAX_TRIAGE_CHARS = 4_000
 
 _SYSTEM_PROMPT = (
@@ -44,13 +48,14 @@ def triage_article(
     ``wrap_untrusted`` so a crafted <title> containing a literal closing tag cannot break
     out of the delimited block and have the rest of its text read as trusted prompt.
 
-    Raises ValueError for a combined title+summary over ``MAX_TRIAGE_CHARS`` rather than
-    sending the request; the orchestrator's per-article triage guard logs it distinctly
-    from a generic API failure.
+    A combined title+summary over ``MAX_TRIAGE_CHARS`` is truncated, not rejected: this is a
+    relevance classifier, not a source of record, so judging from the opening of an
+    over-long entry is an acceptable trade against silently dropping real entries from the
+    knowledge base (see MAX_TRIAGE_CHARS's comment). Truncating also means this function
+    never raises for oversized input, so it can't be miscounted as a failed Anthropic call
+    by the orchestrator's run-health check.
     """
-    combined = f"Title: {title}\nSummary: {summary}"
-    if len(combined) > MAX_TRIAGE_CHARS:
-        raise ValueError(f"feed entry text too long for triage: {len(combined)} chars")
+    combined = f"Title: {title}\nSummary: {summary}"[:MAX_TRIAGE_CHARS]
 
     article_block = wrap_untrusted("article", combined)
     user_content = (
