@@ -32,7 +32,11 @@ def run_ingest(conn: sqlite3.Connection) -> dict:
                 _log_run(conn, source["id"], "error", f"article fetch failed: {entry.url}: {exc}")
                 continue
 
-            store_article(conn, source["id"], entry.url, entry.title, entry.published_at, full_text)
+            try:
+                store_article(conn, source["id"], entry.url, entry.title, entry.published_at, full_text)
+            except Exception as exc:  # noqa: BLE001 — one bad article must not kill the run
+                _log_run(conn, source["id"], "error", f"article store failed: {entry.url}: {exc}")
+                continue
             summary["articles_stored"] += 1
 
         _record_success(conn, source["id"])
