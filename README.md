@@ -24,3 +24,13 @@ the env). `data/` is gitignored and won't exist on a fresh clone, so create
 it before redirecting logs into it:
 
     0 6 * * * cd /Users/spencer/projects/tabs && mkdir -p data && /path/to/venv/bin/tabs ingest >> data/ingest.log 2>&1
+
+## Curation (requires an Anthropic API key)
+
+`tabs ingest` also curates each newly-stored article: a cheap triage pass
+(Claude Haiku 4.5) filters feed entries for relevance before the article body
+is even fetched, and an extraction pass (Claude Sonnet 5) pulls structured
+claims and perspectives out of in-scope articles. Set `ANTHROPIC_API_KEY` in
+your environment before running `tabs ingest` (see Anthropic's documentation
+for how to obtain a key). Claims land in an `unverified` state — confidence
+scoring, conflict detection, and story clustering are a later phase.

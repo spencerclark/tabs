@@ -2,22 +2,35 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
+from tabs.curate.extraction import extract_claims_and_perspectives
+from tabs.curate.storage import store_extraction_result
+from tabs.curate.triage import triage_article
 from tabs.ingest.fetch import REQUEST_DELAY_SECONDS, FeedFetchError, fetch_feed
 from tabs.ingest.storage import fetch_article_text, store_article
 
 RECENT_ARTICLE_WINDOW_DAYS = 14
 # SPEC §5.2: requests are rate-limited with a small delay between them. A feed yields
 # many article fetches, so the per-entry loop needs the same delay fetch_feed applies.
+# This delay is scoped to fetching the allowlisted news site's article body — it does
+# not apply to triage/extraction, which call Anthropic's API, not the news site, and
+# already get retry/backoff from the SDK's own client.
 ARTICLE_REQUEST_DELAY_SECONDS = REQUEST_DELAY_SECONDS
 
 
-def run_ingest(conn: sqlite3.Connection, sleep=time.sleep) -> dict:
-    """Run one ingestion pass over every allowlisted source. Returns a summary dict."""
-    summary = {"sources_ok": 0, "sources_failed": 0, "articles_stored": 0}
+def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
+    """Run one ingestion + curation pass over every allowlisted source. Returns a summary dict."""
+    summary = {
+        "sources_ok": 0,
+        "sources_failed": 0,
+        "articles_stored": 0,
+        "articles_out_of_scope": 0,
+        "claims_extracted": 0,
+        "perspectives_extracted": 0,
+    }
     any_article_fetched = False
     run_started_at = datetime.now(timezone.utc).isoformat()
 
-    sources = conn.execute("SELECT id, feed_url FROM sources").fetchall()
+    sources = conn.execute("SELECT id, name, category, feed_url FROM sources").fetchall()
     for source in sources:
         try:
             entries = fetch_feed(source["feed_url"])
@@ -32,6 +45,19 @@ def run_ingest(conn: sqlite3.Connection, sleep=time.sleep) -> dict:
             if already_seen and entry.url not in recheck_urls:
                 continue  # older article, already ingested, outside the re-check window
 
+            try:
+                triage_result = triage_article(client, entry.title, entry.summary, source["category"])
+            except Exception as exc:  # noqa: BLE001 — one bad article must not kill the run
+                _log_run(
+                    conn, source["id"], "error",
+                    f"triage failed: {entry.url}: {type(exc).__name__}: {exc}",
+                )
+                continue
+
+            if not triage_result.in_scope:
+                summary["articles_out_of_scope"] += 1
+                continue
+
             if any_article_fetched:  # no delay before the very first request of the run
                 sleep(ARTICLE_REQUEST_DELAY_SECONDS)
             any_article_fetched = True
@@ -40,27 +66,41 @@ def run_ingest(conn: sqlite3.Connection, sleep=time.sleep) -> dict:
                 full_text = fetch_article_text(entry.url)
             except Exception as exc:  # noqa: BLE001 — one bad article must not kill the run
                 _log_run(
-                    conn,
-                    source["id"],
-                    "error",
+                    conn, source["id"], "error",
                     f"article fetch failed: {entry.url}: {type(exc).__name__}: {exc}",
                 )
                 continue
 
             try:
-                _, created = store_article(
+                article_id, created = store_article(
                     conn, source["id"], entry.url, entry.title, entry.published_at, full_text
                 )
             except Exception as exc:  # noqa: BLE001 — one bad article must not kill the run
                 _log_run(
-                    conn,
-                    source["id"],
-                    "error",
+                    conn, source["id"], "error",
                     f"article store failed: {entry.url}: {type(exc).__name__}: {exc}",
                 )
                 continue
-            if created:  # unchanged re-fetches must not be counted as newly stored
-                summary["articles_stored"] += 1
+
+            if not created:
+                continue  # unchanged content: already curated on a previous run
+            summary["articles_stored"] += 1
+
+            try:
+                extraction_result = extract_claims_and_perspectives(client, full_text, source["name"])
+            except Exception as exc:  # noqa: BLE001 — one bad article must not kill the run
+                _log_run(
+                    conn, source["id"], "error",
+                    f"extraction failed: {entry.url}: {type(exc).__name__}: {exc}",
+                )
+                continue
+
+            counts = store_extraction_result(
+                conn, article_id, source["id"], entry.published_at,
+                datetime.now(timezone.utc).isoformat(), extraction_result,
+            )
+            summary["claims_extracted"] += counts["claims_created"]
+            summary["perspectives_extracted"] += counts["perspectives_created"]
 
         _record_success(conn, source["id"])
         summary["sources_ok"] += 1

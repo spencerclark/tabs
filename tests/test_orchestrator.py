@@ -2,6 +2,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 import tabs.ingest.orchestrator as orchestrator_module
+from tabs.curate.models import ExtractedItem, ExtractionResult, TriageResult
 from tabs.db import get_connection, init_db
 from tabs.ingest.fetch import FeedFetchError, FetchedEntry
 from tabs.ingest.orchestrator import run_ingest
@@ -21,6 +22,28 @@ def _no_sleep(seconds):
     """Stand-in for the injected rate-limit delay, so tests never actually sleep."""
 
 
+def _always_in_scope(client, title, summary, source_category):
+    """Stand-in triage_article that lets everything through as AppSec, for tests that
+    aren't specifically exercising triage gating."""
+    return TriageResult(in_scope=True, category="AppSec")
+
+
+def _no_extraction(client, full_text, source_name):
+    """Stand-in extract_claims_and_perspectives that extracts nothing, for tests that
+    aren't specifically exercising extraction."""
+    return ExtractionResult()
+
+
+def _install_default_curation_stubs(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "triage_article", _always_in_scope)
+    monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", _no_extraction)
+
+
+DEFAULT_SUMMARY_EXTRAS = {
+    "articles_out_of_scope": 0, "claims_extracted": 0, "perspectives_extracted": 0,
+}
+
+
 def test_run_ingest_delays_between_article_fetches_but_not_before_the_first(tmp_path, monkeypatch):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
@@ -38,6 +61,7 @@ def test_run_ingest_delays_between_article_fetches_but_not_before_the_first(tmp_
         "fetch_feed",
         lambda feed_url: entries_a if feed_url == "https://a.example/feed" else [entry_b],
     )
+    _install_default_curation_stubs(monkeypatch)
 
     calls = []
     monkeypatch.setattr(
@@ -46,7 +70,7 @@ def test_run_ingest_delays_between_article_fetches_but_not_before_the_first(tmp_
         lambda url: calls.append(("fetch", url)) or "text for " + url,
     )
 
-    run_ingest(conn, sleep=lambda seconds: calls.append(("sleep", seconds)))
+    run_ingest(conn, client=None, sleep=lambda seconds: calls.append(("sleep", seconds)))
 
     # three article fetches, two delays: never before the first request of the run
     assert calls == [
@@ -66,19 +90,18 @@ def test_run_ingest_records_a_run_scoped_success_row_even_with_zero_errors(tmp_p
 
     entry = FetchedEntry(url="https://s.example/a", title="A", published_at=None, summary="s")
     monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    _install_default_curation_stubs(monkeypatch)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
-    summary = run_ingest(conn, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
 
-    # a healthy run must leave a trace, otherwise it is indistinguishable from a cron
-    # job that never fired at all
     row = conn.execute(
         "SELECT run_started_at, run_finished_at, source_id, status, message "
         "FROM run_log WHERE source_id IS NULL"
     ).fetchone()
     assert row is not None
     assert row["status"] == "success"
-    assert row["run_started_at"] < row["run_finished_at"]  # not the same timestamp twice
+    assert row["run_started_at"] < row["run_finished_at"]
     assert str(summary["articles_stored"]) in row["message"]
     conn.close()
 
@@ -93,12 +116,11 @@ def test_run_ingest_records_the_run_scoped_row_even_when_a_source_fails(tmp_path
 
     monkeypatch.setattr(orchestrator_module, "fetch_feed", fake_fetch_feed)
 
-    run_ingest(conn, sleep=_no_sleep)
+    run_ingest(conn, client=None, sleep=_no_sleep)
 
     run_rows = conn.execute("SELECT status FROM run_log WHERE source_id IS NULL").fetchall()
     assert len(run_rows) == 1
     assert run_rows[0]["status"] == "success"
-    # the per-source error row is additive, not replaced
     error_rows = conn.execute(
         "SELECT status FROM run_log WHERE source_id IS NOT NULL AND status = 'error'"
     ).fetchall()
@@ -113,11 +135,14 @@ def test_run_ingest_stores_articles_and_records_success(tmp_path, monkeypatch):
 
     entry = FetchedEntry(url="https://good.example/a", title="A", published_at=None, summary="s")
     monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    _install_default_curation_stubs(monkeypatch)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
-    summary = run_ingest(conn, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
 
-    assert summary == {"sources_ok": 1, "sources_failed": 0, "articles_stored": 1}
+    assert summary == {
+        "sources_ok": 1, "sources_failed": 0, "articles_stored": 1, **DEFAULT_SUMMARY_EXTRAS,
+    }
     source_row = conn.execute("SELECT consecutive_failures, last_successful_fetch_at FROM sources").fetchone()
     assert source_row["consecutive_failures"] == 0
     assert source_row["last_successful_fetch_at"] is not None
@@ -140,11 +165,14 @@ def test_run_ingest_skips_failing_source_and_continues(tmp_path, monkeypatch):
         return [good_entry]
 
     monkeypatch.setattr(orchestrator_module, "fetch_feed", fake_fetch_feed)
+    _install_default_curation_stubs(monkeypatch)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
-    summary = run_ingest(conn, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
 
-    assert summary == {"sources_ok": 1, "sources_failed": 1, "articles_stored": 1}
+    assert summary == {
+        "sources_ok": 1, "sources_failed": 1, "articles_stored": 1, **DEFAULT_SUMMARY_EXTRAS,
+    }
     bad_row = conn.execute(
         "SELECT consecutive_failures FROM sources WHERE name = 'Bad Source'"
     ).fetchone()
@@ -167,6 +195,7 @@ def test_run_ingest_skips_previously_ingested_urls_outside_recheck_window(tmp_pa
 
     old_entry = FetchedEntry(url="https://s.example/old", title="Old", published_at=None, summary="s")
     monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [old_entry])
+    _install_default_curation_stubs(monkeypatch)
 
     fetch_calls = []
     monkeypatch.setattr(
@@ -175,7 +204,7 @@ def test_run_ingest_skips_previously_ingested_urls_outside_recheck_window(tmp_pa
         lambda url: fetch_calls.append(url) or "text",
     )
 
-    summary = run_ingest(conn, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
 
     assert fetch_calls == []  # old article, outside the 14-day re-check window: not re-fetched
     assert summary["articles_stored"] == 0
@@ -187,9 +216,6 @@ def test_run_ingest_refetches_previously_ingested_urls_inside_recheck_window(tmp
     init_db(conn)
     _insert_source(conn, "Source", "https://s.example/feed")
     recent_retrieved_at = datetime.now(timezone.utc).isoformat()
-    # seed the real hash of the text the fetch will return, so the unchanged-content
-    # path is genuinely exercised (a literal placeholder hash never matches and would
-    # mask the double-counting bug)
     conn.execute(
         "INSERT INTO articles (source_id, url, title, full_text, content_hash, "
         "published_at, retrieved_at, previous_version_id) "
@@ -200,6 +226,7 @@ def test_run_ingest_refetches_previously_ingested_urls_inside_recheck_window(tmp
 
     recent_entry = FetchedEntry(url="https://s.example/recent", title="Recent", published_at=None, summary="s")
     monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [recent_entry])
+    _install_default_curation_stubs(monkeypatch)
 
     fetch_calls = []
     monkeypatch.setattr(
@@ -208,7 +235,7 @@ def test_run_ingest_refetches_previously_ingested_urls_inside_recheck_window(tmp
         lambda url: fetch_calls.append(url) or "text",
     )
 
-    summary = run_ingest(conn, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
 
     # recent article, inside the 14-day re-check window: must be re-fetched to detect edits/retractions
     assert fetch_calls == ["https://s.example/recent"]
@@ -232,9 +259,10 @@ def test_run_ingest_stores_new_version_when_recheck_finds_changed_content(tmp_pa
 
     recent_entry = FetchedEntry(url="https://s.example/recent", title="Recent", published_at=None, summary="s")
     monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [recent_entry])
+    _install_default_curation_stubs(monkeypatch)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "new text")
 
-    summary = run_ingest(conn, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
 
     assert summary["articles_stored"] == 1
     rows = conn.execute("SELECT id, previous_version_id FROM articles ORDER BY id").fetchall()
@@ -250,14 +278,15 @@ def test_run_ingest_reports_zero_stored_on_second_run_over_unchanged_content(tmp
 
     entry = FetchedEntry(url="https://s.example/a", title="A", published_at=None, summary="s")
     monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    _install_default_curation_stubs(monkeypatch)
     monkeypatch.setattr(
         orchestrator_module,
         "fetch_article_text",
         lambda url: "<html><body><p>Same   article body.</p></body></html>",
     )
 
-    first = run_ingest(conn, sleep=_no_sleep)
-    second = run_ingest(conn, sleep=_no_sleep)
+    first = run_ingest(conn, client=None, sleep=_no_sleep)
+    second = run_ingest(conn, client=None, sleep=_no_sleep)
 
     assert first["articles_stored"] == 1
     # the article is inside the re-check window and is re-fetched, but the content is
@@ -283,6 +312,7 @@ def test_run_ingest_continues_when_store_article_fails_for_one_entry(tmp_path, m
         return [good_entry_b]
 
     monkeypatch.setattr(orchestrator_module, "fetch_feed", fake_fetch_feed)
+    _install_default_curation_stubs(monkeypatch)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
     real_store_article = orchestrator_module.store_article
@@ -296,7 +326,7 @@ def test_run_ingest_continues_when_store_article_fails_for_one_entry(tmp_path, m
 
     monkeypatch.setattr(orchestrator_module, "store_article", fake_store_article)
 
-    summary = run_ingest(conn, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
 
     # the failing store must not abort the run: the second entry in source A and all of
     # source B must still be processed.
@@ -305,11 +335,183 @@ def test_run_ingest_continues_when_store_article_fails_for_one_entry(tmp_path, m
         "https://a.example/good",
         "https://b.example/good",
     ]
-    assert summary == {"sources_ok": 2, "sources_failed": 0, "articles_stored": 2}
+    assert summary == {
+        "sources_ok": 2, "sources_failed": 0, "articles_stored": 2, **DEFAULT_SUMMARY_EXTRAS,
+    }
     error_rows = conn.execute(
         "SELECT message FROM run_log WHERE status = 'error'"
     ).fetchall()
     assert any("https://a.example/bad" in row["message"] for row in error_rows)
     article_row = conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()
     assert article_row["n"] == 2
+    conn.close()
+
+
+def test_run_ingest_skips_out_of_scope_articles_without_fetching_them(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    entry = FetchedEntry(url="https://s.example/off-topic", title="Off Topic", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    monkeypatch.setattr(
+        orchestrator_module,
+        "triage_article",
+        lambda client, title, summary, source_category: TriageResult(in_scope=False),
+    )
+
+    fetch_calls = []
+    monkeypatch.setattr(
+        orchestrator_module,
+        "fetch_article_text",
+        lambda url: fetch_calls.append(url) or "text",
+    )
+
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+
+    # out-of-scope articles are never fetched or stored — triage runs on the cheap
+    # feed-level title/summary before any HTTP fetch of the article body
+    assert fetch_calls == []
+    assert summary == {
+        "sources_ok": 1, "sources_failed": 0, "articles_stored": 0,
+        "articles_out_of_scope": 1, "claims_extracted": 0, "perspectives_extracted": 0,
+    }
+    assert conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"] == 0
+    conn.close()
+
+
+def test_run_ingest_continues_when_triage_fails_for_one_entry(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    bad_entry = FetchedEntry(url="https://s.example/bad", title="Bad", published_at=None, summary="s")
+    good_entry = FetchedEntry(url="https://s.example/good", title="Good", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [bad_entry, good_entry])
+
+    def fake_triage(client, title, summary, source_category):
+        if title == "Bad":
+            raise RuntimeError("simulated triage failure")
+        return TriageResult(in_scope=True, category="AppSec")
+
+    monkeypatch.setattr(orchestrator_module, "triage_article", fake_triage)
+    monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", _no_extraction)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
+
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+
+    # the failing triage call must not abort the run: the second entry must still be processed
+    assert summary["articles_stored"] == 1
+    error_rows = conn.execute(
+        "SELECT message FROM run_log WHERE status = 'error'"
+    ).fetchall()
+    assert any("triage failed" in row["message"] for row in error_rows)
+    conn.close()
+
+
+def test_run_ingest_extracts_claims_and_perspectives_for_a_stored_article(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    entry = FetchedEntry(
+        url="https://s.example/a", title="A", published_at="2026-08-01", summary="s"
+    )
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    monkeypatch.setattr(orchestrator_module, "triage_article", _always_in_scope)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
+
+    extraction_result = ExtractionResult(
+        items=[
+            ExtractedItem(
+                text="A critical flaw was patched.", supporting_excerpt="patched today",
+                item_type="factual", category="AppSec", sub_tags=["Patch"],
+                llm_certainty=0.9, author="Jane Doe",
+            ),
+            ExtractedItem(
+                text="This will likely be exploited within a week.",
+                supporting_excerpt="likely be exploited", item_type="prediction",
+                category="AppSec", sub_tags=[], llm_certainty=0.4,
+            ),
+            ExtractedItem(
+                text="The fix was rushed and poorly tested.",
+                supporting_excerpt="rushed and poorly tested", item_type="opinion",
+                category="AppSec", sub_tags=["Opinion"], llm_certainty=0.7,
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        orchestrator_module,
+        "extract_claims_and_perspectives",
+        lambda client, full_text, source_name: extraction_result,
+    )
+
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+
+    assert summary["claims_extracted"] == 2
+    assert summary["perspectives_extracted"] == 1
+    claim_rows = conn.execute(
+        "SELECT claim_text, claim_type, author, published_at FROM claims ORDER BY id"
+    ).fetchall()
+    assert [row["claim_text"] for row in claim_rows] == [
+        "A critical flaw was patched.", "This will likely be exploited within a week.",
+    ]
+    assert claim_rows[0]["claim_type"] == "factual"
+    assert claim_rows[0]["author"] == "Jane Doe"
+    assert claim_rows[0]["published_at"] == "2026-08-01"
+    perspective_row = conn.execute("SELECT perspective_text FROM perspectives").fetchone()
+    assert perspective_row["perspective_text"] == "The fix was rushed and poorly tested."
+    conn.close()
+
+
+def test_run_ingest_skips_extraction_when_content_is_unchanged(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    entry = FetchedEntry(url="https://s.example/a", title="A", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    monkeypatch.setattr(orchestrator_module, "triage_article", _always_in_scope)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
+
+    extraction_calls = []
+
+    def tracking_extraction(client, full_text, source_name):
+        extraction_calls.append(full_text)
+        return ExtractionResult()
+
+    monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", tracking_extraction)
+
+    run_ingest(conn, client=None, sleep=_no_sleep)  # first run: content is new
+    run_ingest(conn, client=None, sleep=_no_sleep)  # second run: unchanged content
+
+    # extraction must run once, not twice — re-curating unchanged content wastes API calls
+    assert extraction_calls == ["full text"]
+    conn.close()
+
+
+def test_run_ingest_continues_when_extraction_fails_for_one_entry(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    entry = FetchedEntry(url="https://s.example/a", title="A", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    monkeypatch.setattr(orchestrator_module, "triage_article", _always_in_scope)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
+
+    def failing_extraction(client, full_text, source_name):
+        raise RuntimeError("simulated extraction failure")
+
+    monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", failing_extraction)
+
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+
+    # the article itself is still stored — only its curation failed
+    assert summary["articles_stored"] == 1
+    assert summary["claims_extracted"] == 0
+    error_rows = conn.execute(
+        "SELECT message FROM run_log WHERE status = 'error'"
+    ).fetchall()
+    assert any("extraction failed" in row["message"] for row in error_rows)
     conn.close()
