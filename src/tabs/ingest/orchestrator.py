@@ -120,6 +120,11 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
                     datetime.now(timezone.utc).isoformat(), extraction_result,
                 )
             except Exception as exc:  # noqa: BLE001 — one bad article must not kill the run
+                # store_extraction_result INSERTs each item before its single trailing
+                # commit, so a mid-loop failure leaves pending INSERTs on the connection.
+                # Discard them first: _log_run commits, and would otherwise persist those
+                # orphaned rows — rows no summary counter ever accounted for.
+                conn.rollback()
                 _log_run(
                     conn, source["id"], "error",
                     f"curation store failed: {entry.url}: {type(exc).__name__}: {exc}",

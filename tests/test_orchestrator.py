@@ -596,6 +596,52 @@ def test_run_ingest_continues_when_extraction_fails_for_one_entry(tmp_path, monk
     conn.close()
 
 
+def test_run_ingest_rolls_back_partial_curation_writes_when_the_store_fails(tmp_path, monkeypatch):
+    """store_extraction_result INSERTs each item then commits once at the end. If it
+    raises partway through, the pending INSERTs are still on the connection — and
+    _log_run's own commit would otherwise commit those orphaned rows alongside the
+    error entry, even though no summary counter was ever incremented for them."""
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    bad_entry = FetchedEntry(url="https://s.example/bad", title="Bad", published_at=None, summary="s")
+    good_entry = FetchedEntry(url="https://s.example/good", title="Good", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [bad_entry, good_entry])
+    _install_default_curation_stubs(monkeypatch)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text " + url)
+
+    store_calls = []
+
+    def half_written_store(conn, article_id, source_id, published_at, retrieved_at, extraction):
+        store_calls.append(article_id)
+        if len(store_calls) == 1:
+            # simulate failing partway through a multi-item insert loop
+            conn.execute(
+                "INSERT INTO claims (article_id, source_id, claim_text, supporting_excerpt, "
+                "claim_type, category, sub_tags, llm_certainty, retrieved_at, created_at) "
+                "VALUES (?, ?, 'partial', 'x', 'factual', 'AppSec', '[]', 0.5, ?, ?)",
+                (article_id, source_id, retrieved_at, retrieved_at),
+            )
+            raise sqlite3.OperationalError("database is locked")
+        return {"claims_created": 0, "perspectives_created": 0}
+
+    monkeypatch.setattr(orchestrator_module, "store_extraction_result", half_written_store)
+
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+
+    # the half-written claim must not survive: it was rolled back, not committed by the
+    # error-logging path that follows it
+    assert conn.execute("SELECT COUNT(*) AS n FROM claims").fetchone()["n"] == 0
+    assert summary["claims_extracted"] == 0
+    # ...and the run still continued through the second entry
+    assert len(store_calls) == 2
+    assert summary["articles_stored"] == 2
+    error_rows = conn.execute("SELECT message FROM run_log WHERE status = 'error'").fetchall()
+    assert any("curation store failed" in row["message"] for row in error_rows)
+    conn.close()
+
+
 def test_run_ingest_continues_when_curation_store_fails_for_one_entry(tmp_path, monkeypatch):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
