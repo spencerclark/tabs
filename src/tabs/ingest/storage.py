@@ -39,7 +39,7 @@ def _hash_content(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def fetch_article_text(url: str, http_get=requests.get) -> str:
+def fetch_article_text(url: str, http_get=None) -> str:
     """Fetch an article URL and return its normalized visible text.
 
     Allowlisted sources are treated as potentially hostile (SPEC §6.5), so the URL
@@ -48,6 +48,9 @@ def fetch_article_text(url: str, http_get=requests.get) -> str:
     not resolved and private/link-local address ranges are not blocked; that is a
     deliberate residual risk deferred to a later hardening pass.
     """
+    # resolved at call time, not bound as a default, so requests.get stays stubbable
+    http_get = http_get or requests.get
+
     if urlparse(url).scheme.lower() not in ALLOWED_URL_SCHEMES:
         raise ValueError(f"refusing to fetch non-http(s) URL: {url!r}")
 
