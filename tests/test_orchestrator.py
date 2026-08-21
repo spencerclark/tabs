@@ -229,7 +229,15 @@ def test_run_ingest_refetches_previously_ingested_urls_inside_recheck_window(tmp
 
     recent_entry = FetchedEntry(url="https://s.example/recent", title="Recent", published_at=None, summary="s")
     monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [recent_entry])
-    _install_default_curation_stubs(monkeypatch)
+    monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", _no_extraction)
+
+    triage_calls = []
+
+    def tracking_triage(client, title, summary, source_category):
+        triage_calls.append(title)
+        return TriageResult(in_scope=True, category="AppSec")
+
+    monkeypatch.setattr(orchestrator_module, "triage_article", tracking_triage)
 
     fetch_calls = []
     monkeypatch.setattr(
@@ -242,6 +250,10 @@ def test_run_ingest_refetches_previously_ingested_urls_inside_recheck_window(tmp
 
     # recent article, inside the 14-day re-check window: must be re-fetched to detect edits/retractions
     assert fetch_calls == ["https://s.example/recent"]
+    # ...but it was already judged in-scope when first ingested. Re-triaging it burns a
+    # Haiku call per re-check per day, and a nondeterministic flip to in_scope=False would
+    # skip the re-fetch entirely, silently defeating SPEC §5.3 retraction detection.
+    assert triage_calls == []
     # ...but the content is unchanged, so nothing new is stored and nothing is counted
     assert summary["articles_stored"] == 0
     assert conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"] == 1
@@ -262,12 +274,20 @@ def test_run_ingest_stores_new_version_when_recheck_finds_changed_content(tmp_pa
 
     recent_entry = FetchedEntry(url="https://s.example/recent", title="Recent", published_at=None, summary="s")
     monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [recent_entry])
-    _install_default_curation_stubs(monkeypatch)
+    monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", _no_extraction)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "new text")
+
+    def refusing_triage(client, title, summary, source_category):
+        """A re-check must survive triage flipping its verdict — the edited/retracted
+        version still has to be stored (SPEC §5.3)."""
+        return TriageResult(in_scope=False)
+
+    monkeypatch.setattr(orchestrator_module, "triage_article", refusing_triage)
 
     summary = run_ingest(conn, client=None, sleep=_no_sleep)
 
     assert summary["articles_stored"] == 1
+    assert summary["articles_out_of_scope"] == 0
     rows = conn.execute("SELECT id, previous_version_id FROM articles ORDER BY id").fetchall()
     assert len(rows) == 2
     assert rows[1]["previous_version_id"] == rows[0]["id"]
@@ -490,6 +510,41 @@ def test_run_ingest_continues_when_extraction_returns_no_parsed_output(tmp_path,
     ]
     assert any("extraction returned no parsed output" in message for message in messages)
     assert not any("curation store failed" in message for message in messages)
+    conn.close()
+
+
+def test_run_ingest_triages_only_entries_it_has_never_seen_before(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+    conn.execute(
+        "INSERT INTO articles (source_id, url, title, full_text, content_hash, "
+        "published_at, retrieved_at, previous_version_id) "
+        "VALUES (1, 'https://s.example/seen', 'Seen', 'text', ?, NULL, ?, NULL)",
+        (_hash_content("text"), datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+    entries = [
+        FetchedEntry(url="https://s.example/seen", title="Seen", published_at=None, summary="s"),
+        FetchedEntry(url="https://s.example/new", title="New", published_at=None, summary="s"),
+    ]
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: entries)
+    monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", _no_extraction)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "text")
+
+    triage_calls = []
+
+    def tracking_triage(client, title, summary, source_category):
+        triage_calls.append(title)
+        return TriageResult(in_scope=True, category="AppSec")
+
+    monkeypatch.setattr(orchestrator_module, "triage_article", tracking_triage)
+
+    run_ingest(conn, client=None, sleep=_no_sleep)
+
+    # the in-window re-check is not re-triaged; the genuinely new entry is
+    assert triage_calls == ["New"]
     conn.close()
 
 

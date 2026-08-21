@@ -56,31 +56,40 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
             if already_seen and entry.url not in recheck_urls:
                 continue  # older article, already ingested, outside the re-check window
 
-            triage_attempts += 1
-            try:
-                triage_result = triage_article(client, entry.title, entry.summary, source["category"])
-            except Exception as exc:  # noqa: BLE001 — one bad article must not kill the run
-                triage_failures += 1
-                _log_run(
-                    conn, source["id"], "error",
-                    f"triage failed: {entry.url}: {type(exc).__name__}: {exc}",
-                )
-                continue
+            # Triage only genuinely new entries. An already-seen entry reaches here only
+            # because it is inside the re-check window, and it was already judged in-scope
+            # when first ingested. Re-triaging it burns a Haiku call per re-check per day,
+            # and — worse — a nondeterministic flip to in_scope=False would skip the body
+            # re-fetch below, silently defeating SPEC §5.3's edit/retraction detection for
+            # exactly the articles the window exists to watch.
+            if not already_seen:
+                triage_attempts += 1
+                try:
+                    triage_result = triage_article(
+                        client, entry.title, entry.summary, source["category"]
+                    )
+                except Exception as exc:  # noqa: BLE001 — one bad article must not kill the run
+                    triage_failures += 1
+                    _log_run(
+                        conn, source["id"], "error",
+                        f"triage failed: {entry.url}: {type(exc).__name__}: {exc}",
+                    )
+                    continue
 
-            # parsed_output is None when the model refuses (a real possibility for this
-            # corpus of exploit/malware/CVE news). That is not an exception, so it slips
-            # past the guard above — check it before dereferencing .in_scope.
-            if triage_result is None:
-                triage_failures += 1
-                _log_run(
-                    conn, source["id"], "error",
-                    f"triage returned no parsed output (likely a model refusal): {entry.url}",
-                )
-                continue
+                # parsed_output is None when the model refuses (a real possibility for this
+                # corpus of exploit/malware/CVE news). That is not an exception, so it slips
+                # past the guard above — check it before dereferencing .in_scope.
+                if triage_result is None:
+                    triage_failures += 1
+                    _log_run(
+                        conn, source["id"], "error",
+                        f"triage returned no parsed output (likely a model refusal): {entry.url}",
+                    )
+                    continue
 
-            if not triage_result.in_scope:
-                summary["articles_out_of_scope"] += 1
-                continue
+                if not triage_result.in_scope:
+                    summary["articles_out_of_scope"] += 1
+                    continue
 
             if any_article_fetched:  # no delay before the very first request of the run
                 sleep(ARTICLE_REQUEST_DELAY_SECONDS)
