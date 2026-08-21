@@ -54,6 +54,16 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
                 )
                 continue
 
+            # parsed_output is None when the model refuses (a real possibility for this
+            # corpus of exploit/malware/CVE news). That is not an exception, so it slips
+            # past the guard above — check it before dereferencing .in_scope.
+            if triage_result is None:
+                _log_run(
+                    conn, source["id"], "error",
+                    f"triage returned no parsed output (likely a model refusal): {entry.url}",
+                )
+                continue
+
             if not triage_result.in_scope:
                 summary["articles_out_of_scope"] += 1
                 continue
@@ -92,6 +102,15 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
                 _log_run(
                     conn, source["id"], "error",
                     f"extraction failed: {entry.url}: {type(exc).__name__}: {exc}",
+                )
+                continue
+
+            # as with triage: a refusal yields None, not an exception. Without this check
+            # it reaches store_extraction_result and is mislabeled "curation store failed".
+            if extraction_result is None:
+                _log_run(
+                    conn, source["id"], "error",
+                    f"extraction returned no parsed output (likely a model refusal): {entry.url}",
                 )
                 continue
 

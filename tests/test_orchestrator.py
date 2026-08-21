@@ -409,6 +409,85 @@ def test_run_ingest_continues_when_triage_fails_for_one_entry(tmp_path, monkeypa
     conn.close()
 
 
+def test_run_ingest_continues_when_triage_returns_no_parsed_output(tmp_path, monkeypatch):
+    """`client.messages.parse(...).parsed_output` is None on a model refusal — not an
+    exception, so the try/except around the triage call does not catch it. Dereferencing
+    `.in_scope` on it must not abort the run (SPEC §5.4)."""
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source A", "https://a.example/feed")
+    _insert_source(conn, "Source B", "https://b.example/feed")
+
+    refused_entry = FetchedEntry(url="https://a.example/refused", title="Refused", published_at=None, summary="s")
+    good_entry_a = FetchedEntry(url="https://a.example/good", title="Good", published_at=None, summary="s")
+    good_entry_b = FetchedEntry(url="https://b.example/good", title="Good", published_at=None, summary="s")
+
+    def fake_fetch_feed(feed_url):
+        if feed_url == "https://a.example/feed":
+            return [refused_entry, good_entry_a]
+        return [good_entry_b]
+
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", fake_fetch_feed)
+
+    def refusing_triage(client, title, summary, source_category):
+        if title == "Refused":
+            return None  # what a safety refusal looks like: no parsed output, no exception
+        return TriageResult(in_scope=True, category="AppSec")
+
+    monkeypatch.setattr(orchestrator_module, "triage_article", refusing_triage)
+    monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", _no_extraction)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
+
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+
+    # the refused entry is skipped, but the rest of source A and all of source B run
+    assert summary["articles_stored"] == 2
+    assert summary["sources_ok"] == 2
+    error_rows = conn.execute("SELECT message FROM run_log WHERE status = 'error'").fetchall()
+    assert any(
+        "triage returned no parsed output" in row["message"]
+        and "https://a.example/refused" in row["message"]
+        for row in error_rows
+    )
+    # the run-completion row is still written — the run was not aborted mid-flight
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM run_log WHERE source_id IS NULL"
+    ).fetchone()["n"] == 1
+    conn.close()
+
+
+def test_run_ingest_continues_when_extraction_returns_no_parsed_output(tmp_path, monkeypatch):
+    """A None extraction result is a model refusal, not a storage fault — it must be
+    logged as such rather than surfacing as a misleading 'curation store failed'."""
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    entry = FetchedEntry(url="https://s.example/a", title="A", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    monkeypatch.setattr(orchestrator_module, "triage_article", _always_in_scope)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
+    monkeypatch.setattr(
+        orchestrator_module,
+        "extract_claims_and_perspectives",
+        lambda client, full_text, source_name: None,
+    )
+
+    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+
+    # the article itself is still stored — only its curation was refused
+    assert summary["articles_stored"] == 1
+    assert summary["claims_extracted"] == 0
+    assert summary["perspectives_extracted"] == 0
+    messages = [
+        row["message"]
+        for row in conn.execute("SELECT message FROM run_log WHERE status = 'error'").fetchall()
+    ]
+    assert any("extraction returned no parsed output" in message for message in messages)
+    assert not any("curation store failed" in message for message in messages)
+    conn.close()
+
+
 def test_run_ingest_extracts_claims_and_perspectives_for_a_stored_article(tmp_path, monkeypatch):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
