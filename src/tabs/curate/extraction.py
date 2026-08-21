@@ -5,6 +5,18 @@ from tabs.curate.prompting import wrap_untrusted
 
 EXTRACTION_MODEL = "claude-sonnet-5"
 
+
+class ExtractionInputTooLarge(ValueError):
+    """Raised locally, before any request, when full_text exceeds MAX_EXTRACTION_CHARS.
+
+    A dedicated subclass rather than a bare ValueError: pydantic's ValidationError (raised
+    by the Anthropic SDK's structured-output parsing when a real API response fails schema
+    validation, e.g. on truncation) is ALSO a ValueError subclass. The orchestrator's
+    run-health check needs to tell "never sent a request" apart from "sent a request that
+    came back malformed" — the former must not count toward the failed-API-call tally, the
+    latter must. Catching this specific type (not ValueError generally) makes that possible.
+    """
+
 # The schema emits several items, each with text/supporting_excerpt/tags, so the output
 # budget has to fit a full multi-item response: on truncation the structured-output parse
 # fails on incomplete JSON and the article is skipped (permanently — see the orchestrator's
@@ -62,12 +74,15 @@ def extract_claims_and_perspectives(
     into full_text. The per-request nonce on the tag name makes that forged closing tag
     unable to match, so it cannot end the block and promote the text after it to trusted.
 
-    Raises ValueError for text over ``MAX_EXTRACTION_CHARS`` rather than sending the
-    request; the orchestrator's per-article extraction guard logs it distinctly from a
-    generic API failure.
+    Raises ExtractionInputTooLarge for text over ``MAX_EXTRACTION_CHARS`` rather than
+    sending the request; the orchestrator's per-article extraction guard catches this
+    specific type to log it distinctly from a genuine API failure and exclude it from the
+    run-health check's attempt/failure tally.
     """
     if len(full_text) > MAX_EXTRACTION_CHARS:
-        raise ValueError(f"article text too long for extraction: {len(full_text)} chars")
+        raise ExtractionInputTooLarge(
+            f"article text too long for extraction: {len(full_text)} chars"
+        )
 
     article_block = wrap_untrusted("article_content", full_text)
     user_content = f"Source: {source_name}\n\n{article_block}"

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import pytest
 
 import tabs.ingest.orchestrator as orchestrator_module
+from tabs.curate.extraction import ExtractionInputTooLarge
 from tabs.curate.models import ExtractedItem, ExtractionResult, TriageResult
 from tabs.db import get_connection, init_db
 from tabs.ingest.fetch import FeedFetchError, FetchedEntry
@@ -787,13 +788,13 @@ def test_run_ingest_raises_when_the_only_calls_this_run_are_failing_extractions(
 def test_run_ingest_does_not_raise_when_the_only_entry_is_rejected_for_being_oversized(
     tmp_path, monkeypatch
 ):
-    """extract_claims_and_perspectives raises ValueError locally, before any request, for
-    article text over MAX_EXTRACTION_CHARS. That is a pre-flight rejection, not a failed
-    Anthropic call. Using an already-seen re-check entry (which skips triage entirely, so
-    extraction is the run's *only* possible Anthropic call) isolates the case: without it, a
-    genuinely new entry's successful triage call would dilute the mutation this test targets
-    and let a regression pass unnoticed — the run must not falsely report "every Anthropic
-    API call failed" when zero API calls were ever attempted."""
+    """extract_claims_and_perspectives raises ExtractionInputTooLarge locally, before any
+    request, for article text over MAX_EXTRACTION_CHARS. That is a pre-flight rejection, not
+    a failed Anthropic call. Using an already-seen re-check entry (which skips triage
+    entirely, so extraction is the run's *only* possible Anthropic call) isolates the case:
+    without it, a genuinely new entry's successful triage call would dilute the mutation
+    this test targets and let a regression pass unnoticed — the run must not falsely report
+    "every Anthropic API call failed" when zero API calls were ever attempted."""
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
     _insert_source(conn, "Source", "https://s.example/feed")
@@ -818,11 +819,11 @@ def test_run_ingest_does_not_raise_when_the_only_entry_is_rejected_for_being_ove
     monkeypatch.setattr(orchestrator_module, "triage_article", never_called_triage)
 
     def oversized_extraction(client, full_text, source_name):
-        raise ValueError("article text too long for extraction: 999999 chars")
+        raise ExtractionInputTooLarge("article text too long for extraction: 999999 chars")
 
     monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", oversized_extraction)
 
-    # must not raise: the ValueError is a local rejection, not evidence the client is broken
+    # must not raise: this is a local rejection, not evidence the client is broken
     summary = run_ingest(conn, client=None, sleep=_no_sleep)
 
     assert triage_calls == []
@@ -832,6 +833,48 @@ def test_run_ingest_does_not_raise_when_the_only_entry_is_rejected_for_being_ove
         "SELECT message FROM run_log WHERE status = 'error'"
     ).fetchall()
     assert any("extraction input rejected" in row["message"] for row in error_rows)
+    conn.close()
+
+
+def test_run_ingest_raises_when_the_only_call_is_a_genuine_schema_validation_failure(
+    tmp_path, monkeypatch
+):
+    """pydantic's ValidationError — raised by the Anthropic SDK's structured-output parsing
+    when a genuine API response fails schema validation (e.g. a truncated response) — is
+    ALSO a ValueError subclass, just like ExtractionInputTooLarge. Unlike that local
+    pre-flight rejection, this failure mode means a real request was sent and answered, so
+    it must still count toward the run-health check: catching ValueError too broadly here
+    would silently exclude a real, billed API failure from ever being detected. Plain
+    ValueError (not ExtractionInputTooLarge) stands in for pydantic's ValidationError."""
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+    conn.execute(
+        "INSERT INTO articles (source_id, url, title, full_text, content_hash, "
+        "published_at, retrieved_at, previous_version_id) "
+        "VALUES (1, 'https://s.example/recent', 'Recent', 'old text', ?, NULL, ?, NULL)",
+        (_hash_content("old text"), datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+    entry = FetchedEntry(url="https://s.example/recent", title="Recent", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "new text")
+
+    def never_called_triage(client, title, summary, source_category):
+        raise AssertionError("triage must not be called for an already-seen entry")
+
+    monkeypatch.setattr(orchestrator_module, "triage_article", never_called_triage)
+
+    def schema_invalid_extraction(client, full_text, source_name):
+        raise ValueError("1 validation error for ExtractionResult: Invalid JSON")
+
+    monkeypatch.setattr(
+        orchestrator_module, "extract_claims_and_perspectives", schema_invalid_extraction
+    )
+
+    with pytest.raises(RuntimeError, match="every Anthropic API call failed"):
+        run_ingest(conn, client=None, sleep=_no_sleep)
     conn.close()
 
 

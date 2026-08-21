@@ -2,7 +2,7 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
-from tabs.curate.extraction import extract_claims_and_perspectives
+from tabs.curate.extraction import ExtractionInputTooLarge, extract_claims_and_perspectives
 from tabs.curate.storage import store_extraction_result
 from tabs.curate.triage import triage_article
 from tabs.ingest.fetch import REQUEST_DELAY_SECONDS, FeedFetchError, fetch_feed
@@ -133,11 +133,15 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
 
             try:
                 extraction_result = extract_claims_and_perspectives(client, full_text, source["name"])
-            except ValueError as exc:
+            except ExtractionInputTooLarge as exc:
                 # a local pre-flight rejection (article text over MAX_EXTRACTION_CHARS) —
                 # the request was never sent, so it must not count toward the run-health
                 # check's attempt/failure tally, or an oversized article could make a quiet
-                # run falsely report "every Anthropic API call failed".
+                # run falsely report "every Anthropic API call failed". Caught by this
+                # specific type, not bare ValueError: pydantic's ValidationError (raised by
+                # the SDK when a genuine API response fails schema validation) is also a
+                # ValueError subclass, and that failure IS a real, billed API attempt that
+                # must count.
                 _log_run(
                     conn, source["id"], "error",
                     f"extraction input rejected: {entry.url}: {exc}",

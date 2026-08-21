@@ -33,7 +33,14 @@ def test_triage_article_returns_the_parsed_result():
     assert result.category == "AI Security"
 
 
-def test_triage_article_truncates_oversized_input_instead_of_rejecting_it():
+def _untrusted_block_content(user_content: str) -> str:
+    """Extract exactly what sits between the nonce-bearing delimiter tags."""
+    match = re.search(r"<article_[0-9a-f]{16}>\n(.*)\n</article_[0-9a-f]{16}>", user_content, re.DOTALL)
+    assert match is not None, "Untrusted content must be wrapped in a nonce-bearing tag"
+    return match.group(1)
+
+
+def test_triage_article_truncates_oversized_input_to_exactly_the_cap():
     """feedparser applies no size cap on title/summary, and some real feeds legitimately
     ship long summaries (e.g. full-text blog entries) well past a few thousand characters.
     Rejecting those would silently and permanently drop real entries from the knowledge
@@ -45,19 +52,23 @@ def test_triage_article_truncates_oversized_input_instead_of_rejecting_it():
     triage_article(client, "x" * (MAX_TRIAGE_CHARS * 2), "summary", "AppSec")
 
     assert len(client.messages.calls) == 1
-    user_content = client.messages.calls[0]["messages"][0]["content"]
-    assert len(user_content) < MAX_TRIAGE_CHARS * 2
+    block = _untrusted_block_content(client.messages.calls[0]["messages"][0]["content"])
+    assert len(block) == MAX_TRIAGE_CHARS
 
 
-def test_triage_article_accepts_input_at_the_length_cap():
+def test_triage_article_does_not_truncate_input_at_or_under_the_cap():
     client = _FakeClient(TriageResult(in_scope=False))
 
-    # "Title: " + "Summary: " prefixes push the combined length slightly over the cap
-    # unless the title itself is sized to land exactly at MAX_TRIAGE_CHARS combined.
+    # "Title: " + "\n" + "Summary: " prefixes push the combined length slightly over the
+    # cap unless the title itself is sized to land exactly at MAX_TRIAGE_CHARS combined.
     title = "x" * (MAX_TRIAGE_CHARS - len("Title: \nSummary: "))
     triage_article(client, title, "", "AppSec")
 
     assert len(client.messages.calls) == 1
+    block = _untrusted_block_content(client.messages.calls[0]["messages"][0]["content"])
+    # exactly at the cap: content must survive intact, not be truncated by even one char
+    assert block == f"Title: {title}\nSummary: "
+    assert len(block) == MAX_TRIAGE_CHARS
 
 
 def test_triage_article_uses_the_triage_model():
