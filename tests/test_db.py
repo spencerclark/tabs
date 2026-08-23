@@ -43,3 +43,23 @@ def test_init_db_is_idempotent(tmp_path):
     init_db(conn)  # must not raise
 
     conn.close()
+
+
+def test_init_db_adds_an_embedding_column_to_claims(tmp_path):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
+
+    assert "embedding" in columns
+    conn.close()
+
+
+def test_init_db_creates_the_claims_category_retrieved_at_index(tmp_path):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+
+    assert "idx_claims_category_retrieved_at" in {row["name"] for row in rows}
+    conn.close()
