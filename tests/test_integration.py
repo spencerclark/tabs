@@ -1,18 +1,22 @@
-"""End-to-end ingest: CLI -> sync_sources -> run_ingest -> fetch_feed -> store_article.
+"""End-to-end ingest: CLI -> sync_sources -> run_ingest -> fetch_feed -> store_article
+-> triage/extraction -> claims/perspectives.
 
 Every other test in the suite stubs at a module boundary, so the real contracts between
-these layers (FetchedEntry, the extracted-text hashing path, the CLI wiring) are never
-exercised together. This test stubs only the outermost boundaries: feedparser.parse and
-requests.get.
+these layers (FetchedEntry, the extracted-text hashing path, the CLI wiring, the
+triage/extraction routing into claims vs perspectives) are never exercised together.
+This test stubs only the outermost boundaries: feedparser.parse, requests.get, and the
+Anthropic client construction (anthropic.Anthropic itself is never invoked for real).
 """
 
 import feedparser
 import requests
 from click.testing import CliRunner
 
+import tabs.commands.ingest_cmd as ingest_cmd_module
 import tabs.ingest.fetch as fetch_module
 import tabs.ingest.orchestrator as orchestrator_module
 from tabs.cli import main
+from tabs.curate.models import ExtractedItem, ExtractionResult, TriageResult
 from tabs.db import get_connection
 from tabs.ingest.storage import _extract_text, _hash_content
 
@@ -60,6 +64,38 @@ def _parsed_feed():
     return parsed
 
 
+class _FakeParseResponse:
+    def __init__(self, parsed_output):
+        self.parsed_output = parsed_output
+
+
+class _FakeMessages:
+    """Stands in for client.messages — routes on output_format, like the real API
+    would route on the caller's requested schema."""
+
+    def parse(self, *, model, max_tokens, system, messages, output_format):
+        if output_format is TriageResult:
+            return _FakeParseResponse(TriageResult(in_scope=True, category="AppSec"))
+        if output_format is ExtractionResult:
+            return _FakeParseResponse(
+                ExtractionResult(
+                    items=[
+                        ExtractedItem(
+                            text="A vulnerability was disclosed and patched.",
+                            supporting_excerpt="patched", item_type="factual",
+                            category="AppSec", sub_tags=["Patch"], llm_certainty=0.85,
+                        ),
+                    ]
+                )
+            )
+        raise AssertionError(f"unexpected output_format: {output_format}")
+
+
+class _FakeAnthropicClient:
+    def __init__(self):
+        self.messages = _FakeMessages()
+
+
 def _install_stubs(monkeypatch, pages: dict[str, bytes], fetched: list[str]):
     monkeypatch.setattr(feedparser, "parse", lambda url: _parsed_feed())
 
@@ -71,6 +107,8 @@ def _install_stubs(monkeypatch, pages: dict[str, bytes], fetched: list[str]):
     # keep the real code paths, just don't actually wait out the rate-limit delays
     monkeypatch.setattr(fetch_module, "REQUEST_DELAY_SECONDS", 0)
     monkeypatch.setattr(orchestrator_module, "ARTICLE_REQUEST_DELAY_SECONDS", 0)
+    # never make a real Anthropic API call
+    monkeypatch.setattr(ingest_cmd_module.anthropic, "Anthropic", _FakeAnthropicClient)
 
 
 def _write_sources_yaml(tmp_path):
@@ -100,6 +138,7 @@ def test_ingest_command_end_to_end_stores_extracted_articles(tmp_path, monkeypat
 
     assert result.exit_code == 0, result.output
     assert "sources_ok=1 sources_failed=0 articles_stored=2" in result.output
+    assert "claims_extracted=2" in result.output
     assert fetched == [ARTICLE_A, ARTICLE_B]
 
     conn = get_connection(db_path)
@@ -124,6 +163,11 @@ def test_ingest_command_end_to_end_stores_extracted_articles(tmp_path, monkeypat
     assert "window.adSlot" not in stored["full_text"]
     assert stored["content_hash"] == _hash_content(stored["full_text"])
 
+    # one factual claim extracted per article, via the fake client's canned response
+    claim_rows = conn.execute("SELECT article_id, claim_text, status FROM claims").fetchall()
+    assert len(claim_rows) == 2
+    assert all(row["status"] == "unverified" for row in claim_rows)  # not scored yet — Phase 2b's job
+
     run_row = conn.execute(
         "SELECT status, message FROM run_log WHERE source_id IS NULL"
     ).fetchone()
@@ -145,6 +189,7 @@ def test_ingest_command_end_to_end_is_idempotent_across_boilerplate_churn(tmp_pa
     first = runner.invoke(main, argv)
     assert first.exit_code == 0, first.output
     assert "articles_stored=2" in first.output
+    assert "claims_extracted=2" in first.output
 
     # second run: same article text, different ad/script tokens and whitespace, plus one
     # genuine edit to article B
@@ -159,8 +204,10 @@ def test_ingest_command_end_to_end_is_idempotent_across_boilerplate_churn(tmp_pa
     assert second.exit_code == 0, second.output
     # both are inside the 14-day re-check window, so both are re-fetched...
     assert refetched == [ARTICLE_A, ARTICLE_B]
-    # ...but only the genuinely edited one is stored as a new version
+    # ...but only the genuinely edited one is stored as a new version...
     assert "articles_stored=1" in second.output
+    # ...and only that one is re-curated
+    assert "claims_extracted=1" in second.output
 
     conn = get_connection(db_path)
     a_rows = conn.execute(
@@ -175,4 +222,9 @@ def test_ingest_command_end_to_end_is_idempotent_across_boilerplate_churn(tmp_pa
     assert len(b_rows) == 2
     assert b_rows[1]["previous_version_id"] == b_rows[0]["id"]
     assert "withdrawn" in b_rows[1]["full_text"]
+
+    # 2 claims from the first run (one per article) + 1 from the second run's single
+    # re-curated article (B) — A's boilerplate churn must not trigger re-extraction
+    claim_count = conn.execute("SELECT COUNT(*) AS n FROM claims").fetchone()["n"]
+    assert claim_count == 3
     conn.close()

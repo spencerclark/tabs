@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import anthropic
 import click
 
 from tabs.db import get_connection, init_db
@@ -18,16 +19,21 @@ DEFAULT_SOURCES_PATH = Path("sources.yaml")
 )
 @click.pass_context
 def ingest_cmd(ctx: click.Context, sources_path: Path) -> None:
-    """Sync the source allowlist, then fetch and store new articles from every source."""
+    """Sync the source allowlist, then fetch, store, and curate new articles from every source."""
     conn = get_connection(ctx.obj["db_path"])
     try:
         init_db(conn)
         sync_sources(conn, load_sources_yaml(sources_path))
-        summary = run_ingest(conn)
+        client = anthropic.Anthropic()
+        summary = run_ingest(conn, client)
         click.echo(
             f"sources_ok={summary['sources_ok']} "
             f"sources_failed={summary['sources_failed']} "
-            f"articles_stored={summary['articles_stored']}"
+            f"articles_stored={summary['articles_stored']} "
+            f"articles_out_of_scope={summary['articles_out_of_scope']} "
+            f"articles_uncurated={summary['articles_uncurated']} "
+            f"claims_extracted={summary['claims_extracted']} "
+            f"perspectives_extracted={summary['perspectives_extracted']}"
         )
     except (click.ClickException, click.Abort, click.exceptions.Exit):
         raise  # Click's own control flow, already renders cleanly

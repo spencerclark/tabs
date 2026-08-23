@@ -21,7 +21,11 @@ def test_ingest_command_syncs_sources_and_runs_ingest(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ingest_cmd_module,
         "run_ingest",
-        lambda conn: {"sources_ok": 1, "sources_failed": 0, "articles_stored": 3},
+        lambda conn, client: {
+            "sources_ok": 1, "sources_failed": 0, "articles_stored": 3,
+            "articles_out_of_scope": 1, "articles_uncurated": 4,
+            "claims_extracted": 5, "perspectives_extracted": 2,
+        },
     )
 
     runner = CliRunner()
@@ -32,8 +36,11 @@ def test_ingest_command_syncs_sources_and_runs_ingest(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert "articles_stored=3" in result.output
+    assert "articles_out_of_scope=1" in result.output
+    assert "articles_uncurated=4" in result.output
+    assert "claims_extracted=5" in result.output
+    assert "perspectives_extracted=2" in result.output
 
-    # Verify that the source was actually synced to the database
     conn = get_connection(db_path)
     source_row = conn.execute("SELECT COUNT(*) AS n FROM sources").fetchone()
     assert source_row["n"] == 1
@@ -101,7 +108,7 @@ def test_ingest_command_closes_the_connection_when_the_command_body_raises(tmp_p
 
     monkeypatch.setattr(ingest_cmd_module, "get_connection", tracking_get_connection)
 
-    def boom(conn):
+    def boom(conn, client):
         raise RuntimeError("unexpected mid-command failure")
 
     monkeypatch.setattr(ingest_cmd_module, "run_ingest", boom)
@@ -117,3 +124,36 @@ def test_ingest_command_closes_the_connection_when_the_command_body_raises(tmp_p
     assert len(opened) == 1
     with pytest.raises(sqlite3.ProgrammingError):  # closed connections raise on use
         opened[0].execute("SELECT 1")
+
+
+def test_ingest_command_constructs_and_passes_an_anthropic_client(tmp_path, monkeypatch):
+    sources_yaml = tmp_path / "sources.yaml"
+    sources_yaml.write_text(
+        "- name: Test Source\n"
+        "  feed_url: https://test.example/feed\n"
+        "  category: AppSec\n"
+        "  institutional_tier: 2\n"
+    )
+
+    fake_client = object()
+    monkeypatch.setattr(ingest_cmd_module.anthropic, "Anthropic", lambda: fake_client)
+
+    received = {}
+
+    def fake_run_ingest(conn, client):
+        received["client"] = client
+        return {
+            "sources_ok": 0, "sources_failed": 0, "articles_stored": 0,
+            "articles_out_of_scope": 0, "articles_uncurated": 0,
+            "claims_extracted": 0, "perspectives_extracted": 0,
+        }
+
+    monkeypatch.setattr(ingest_cmd_module, "run_ingest", fake_run_ingest)
+
+    result = CliRunner().invoke(
+        main,
+        ["--db-path", str(tmp_path / "test.db"), "ingest", "--sources-path", str(sources_yaml)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert received["client"] is fake_client
