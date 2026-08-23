@@ -54,18 +54,39 @@ def test_find_candidate_claims_returns_similar_claims_in_the_same_category(tmp_p
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
     source_id = _insert_source(conn, "source")
+    other_source_id = _insert_source(conn, "other_source")
     article_a = _insert_article(conn, source_id, "https://source.example/a")
-    article_b = _insert_article(conn, source_id, "https://source.example/b")
+    article_b = _insert_article(conn, other_source_id, "https://other-source.example/b")
     _insert_claim(conn, article_a, source_id, "New claim's own article", embedding=[1.0, 0.0])
     matching_id = _insert_claim(
-        conn, article_b, source_id, "A similar claim", embedding=[0.99, 0.01],
+        conn, article_b, other_source_id, "A similar claim", embedding=[0.99, 0.01],
     )
 
     candidates = find_candidate_claims(
-        conn, claim_id=999999, article_id=article_a, category="AppSec", embedding=[1.0, 0.0],
+        conn, claim_id=999999, article_id=article_a, source_id=source_id,
+        category="AppSec", embedding=[1.0, 0.0],
     )
 
     assert [c.claim_id for c in candidates] == [matching_id]
+    conn.close()
+
+
+def test_find_candidate_claims_excludes_claims_from_the_same_source(tmp_path):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    source_id = _insert_source(conn, "source")
+    article_a = _insert_article(conn, source_id, "https://source.example/a")
+    article_b = _insert_article(conn, source_id, "https://source.example/b")
+    _insert_claim(
+        conn, article_b, source_id, "Same-outlet repeat coverage", embedding=[1.0, 0.0],
+    )
+
+    candidates = find_candidate_claims(
+        conn, claim_id=999999, article_id=article_a, source_id=source_id,
+        category="AppSec", embedding=[1.0, 0.0],
+    )
+
+    assert candidates == []  # SPEC §6.3: corroboration requires a DIFFERENT source
     conn.close()
 
 
@@ -78,8 +99,8 @@ def test_find_candidate_claims_excludes_claims_from_the_same_article(tmp_path):
     _insert_claim(conn, article_id, source_id, "Sibling claim, same article", embedding=[1.0, 0.0])
 
     candidates = find_candidate_claims(
-        conn, claim_id=new_claim_id, article_id=article_id, category="AppSec",
-        embedding=[1.0, 0.0],
+        conn, claim_id=new_claim_id, article_id=article_id, source_id=source_id,
+        category="AppSec", embedding=[1.0, 0.0],
     )
 
     assert candidates == []
@@ -95,7 +116,8 @@ def test_find_candidate_claims_excludes_claims_below_the_similarity_threshold(tm
     _insert_claim(conn, article_b, source_id, "Unrelated claim", embedding=[0.0, 1.0])
 
     candidates = find_candidate_claims(
-        conn, claim_id=999999, article_id=article_a, category="AppSec", embedding=[1.0, 0.0],
+        conn, claim_id=999999, article_id=article_a, source_id=source_id,
+        category="AppSec", embedding=[1.0, 0.0],
     )
 
     assert candidates == []
@@ -117,7 +139,8 @@ def test_find_candidate_claims_excludes_claims_outside_the_recheck_window(tmp_pa
     )
 
     candidates = find_candidate_claims(
-        conn, claim_id=999999, article_id=article_a, category="AppSec", embedding=[1.0, 0.0],
+        conn, claim_id=999999, article_id=article_a, source_id=source_id,
+        category="AppSec", embedding=[1.0, 0.0],
     )
 
     assert candidates == []
@@ -136,7 +159,8 @@ def test_find_candidate_claims_excludes_a_different_category(tmp_path):
     )
 
     candidates = find_candidate_claims(
-        conn, claim_id=999999, article_id=article_a, category="AppSec", embedding=[1.0, 0.0],
+        conn, claim_id=999999, article_id=article_a, source_id=source_id,
+        category="AppSec", embedding=[1.0, 0.0],
     )
 
     assert candidates == []
@@ -147,18 +171,20 @@ def test_find_candidate_claims_ranks_by_similarity_and_caps_at_max_candidates(tm
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
     source_id = _insert_source(conn, "source")
+    candidates_source_id = _insert_source(conn, "candidates_source")
     article_a = _insert_article(conn, source_id, "https://source.example/a")
     expected_order = []
     for i in range(MAX_CANDIDATES + 2):
-        article = _insert_article(conn, source_id, f"https://source.example/b{i}")
+        article = _insert_article(conn, candidates_source_id, f"https://other-source.example/b{i}")
         # decreasing similarity: [1.0, i*0.01] moves further from [1.0, 0.0] as i grows
         claim_id = _insert_claim(
-            conn, article, source_id, f"Claim {i}", embedding=[1.0, i * 0.01],
+            conn, article, candidates_source_id, f"Claim {i}", embedding=[1.0, i * 0.01],
         )
         expected_order.append(claim_id)
 
     candidates = find_candidate_claims(
-        conn, claim_id=999999, article_id=article_a, category="AppSec", embedding=[1.0, 0.0],
+        conn, claim_id=999999, article_id=article_a, source_id=source_id,
+        category="AppSec", embedding=[1.0, 0.0],
     )
 
     assert len(candidates) == MAX_CANDIDATES
@@ -169,13 +195,15 @@ def test_find_candidate_claims_ranks_by_similarity_and_caps_at_max_candidates(tm
 def test_find_candidate_claims_computes_effective_tier_as_the_max(tmp_path):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
+    new_claim_source_id = _insert_source(conn, "new_claim_source")
     source_id = _insert_source(conn, "source", institutional_tier=1, earned_tier=3)
-    article_a = _insert_article(conn, source_id, "https://source.example/a")
+    article_a = _insert_article(conn, new_claim_source_id, "https://new-claim-source.example/a")
     article_b = _insert_article(conn, source_id, "https://source.example/b")
     _insert_claim(conn, article_b, source_id, "Claim", embedding=[1.0, 0.0])
 
     candidates = find_candidate_claims(
-        conn, claim_id=999999, article_id=article_a, category="AppSec", embedding=[1.0, 0.0],
+        conn, claim_id=999999, article_id=article_a, source_id=new_claim_source_id,
+        category="AppSec", embedding=[1.0, 0.0],
     )
 
     assert candidates[0].effective_tier == 3

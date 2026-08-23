@@ -203,6 +203,10 @@ def run_ingest(conn: sqlite3.Connection, client, voyage_client, sleep=time.sleep
                         conn, client, voyage_client, new_claim_id,
                     )
                 except Exception as exc:  # noqa: BLE001 — one bad claim must not kill the run
+                    # score_and_corroborate_claim does several separate execute+commit
+                    # sequences internally — a mid-call failure can leave an uncommitted
+                    # write pending. Discard it before _log_run, which itself commits.
+                    conn.rollback()
                     _log_run(
                         conn, source["id"], "error",
                         f"scoring failed: claim {new_claim_id}: {type(exc).__name__}: {exc}",

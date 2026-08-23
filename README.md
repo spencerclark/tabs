@@ -47,6 +47,7 @@ recent same-category claims to detect corroboration and conflicts, producing a c
 confidence score that gates each claim to `verified`, `unverified`, or `misinformation`
 (SPEC.md §6.3-6.4). Set `VOYAGE_API_KEY` in your environment alongside `ANTHROPIC_API_KEY`.
 Unlike a fully-broken Anthropic key, a fully-broken Voyage key does not currently fail the
-run — every claim is scored on its own tier/certainty/type merits without corroboration,
-logged per-claim in `run_log`, visible via the `claims_scored`/`claims_unscored` summary
-counts rather than a non-zero exit.
+run — every claim is still scored on its own tier/certainty/type merits without a
+corroboration signal. This shows up per-claim in `run_log` ("embedding failed for claim
+..."), not in the `claims_scored`/`claims_unscored` summary counts: a degraded-but-successful
+scoring still counts as scored, so those counters look identical to a fully healthy run.

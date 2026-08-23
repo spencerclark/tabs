@@ -32,14 +32,16 @@ class Candidate:
 
 
 def find_candidate_claims(
-    conn: sqlite3.Connection, claim_id: int, article_id: int, category: str,
-    embedding: list[float],
+    conn: sqlite3.Connection, claim_id: int, article_id: int, source_id: int,
+    category: str, embedding: list[float],
 ) -> list[Candidate]:
     """Find up to MAX_CANDIDATES existing claims plausibly related to a new claim.
 
     Scoped to the same category, within the last CORROBORATION_WINDOW_DAYS, excluding
     other claims from the same article (extraction can produce several claims from one
-    article — those aren't independent corroboration) and the claim itself. Candidates are
+    article — those aren't independent corroboration), the same source (SPEC §6.3 defines
+    corroboration as "same underlying claim, different source" — same-outlet repeat
+    coverage isn't independent confirmation either), and the claim itself. Candidates are
     ranked by cosine similarity and filtered to SIMILARITY_THRESHOLD before being
     returned, so an LLM judgment call is only spent on plausible matches, not the whole
     category — deliberately plain Python, not a vector-index extension: this only ever
@@ -54,11 +56,12 @@ def find_candidate_claims(
         JOIN sources s ON s.id = c.source_id
         WHERE c.category = ?
           AND c.article_id != ?
+          AND c.source_id != ?
           AND c.id != ?
           AND c.embedding IS NOT NULL
           AND c.retrieved_at >= ?
         """,
-        (category, article_id, claim_id, cutoff),
+        (category, article_id, source_id, claim_id, cutoff),
     ).fetchall()
 
     scored = []

@@ -55,7 +55,7 @@ def score_and_corroborate_claim(
     if embedding is not None:
         candidates = find_candidate_claims(
             conn, claim_id=claim_id, article_id=claim["article_id"],
-            category=claim["category"], embedding=embedding,
+            source_id=claim["source_id"], category=claim["category"], embedding=embedding,
         )
         if candidates:
             source_row = conn.execute(
@@ -127,9 +127,14 @@ def _join_story_cluster(conn, claim_id, category, corroborating_candidates):
     cluster if none of the matches already has one, then recompute and re-gate every
     member's corroboration_count/status so the cluster stays internally consistent.
 
-    If multiple corroborating candidates exist in different clusters, this joins only the
-    best (highest-similarity) one — merging separate clusters together is not attempted;
-    a known simplification for this phase (see the plan's Deferred Scope).
+    Every corroborating candidate that doesn't already belong to a cluster joins this one
+    too (not just the single best match) — the model judged all of them as describing the
+    same event, so all of them should count toward the corroboration signal.
+
+    If multiple corroborating candidates exist in DIFFERENT existing clusters, this joins
+    only the one belonging to the best (highest-similarity) match's cluster — merging two
+    separate existing clusters together is not attempted; a known simplification for this
+    phase (see the plan's Deferred Scope).
     """
     corroborating_candidates = sorted(
         corroborating_candidates, key=lambda c: c.similarity, reverse=True,
@@ -145,12 +150,18 @@ def _join_story_cluster(conn, claim_id, category, corroborating_candidates):
             (category, now),
         )
         cluster_id = cursor.lastrowid
-        best_match = corroborating_candidates[0]
-        conn.execute(
-            "UPDATE claims SET story_cluster_id = ? WHERE id = ?", (cluster_id, best_match.claim_id),
-        )
     else:
         cluster_id = existing_cluster_id
+
+    unclustered_ids = [
+        c.claim_id for c in corroborating_candidates if c.story_cluster_id is None
+    ]
+    if unclustered_ids:
+        placeholders = ",".join("?" for _ in unclustered_ids)
+        conn.execute(
+            f"UPDATE claims SET story_cluster_id = ? WHERE id IN ({placeholders})",
+            (cluster_id, *unclustered_ids),
+        )
 
     conn.execute("UPDATE claims SET story_cluster_id = ? WHERE id = ?", (cluster_id, claim_id))
     conn.commit()

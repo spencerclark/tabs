@@ -18,6 +18,8 @@ def embed_text(voyage_client, text: str) -> list[float]:
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Cosine similarity between two equal-length embedding vectors, in [-1.0, 1.0]."""
+    if len(a) != len(b):
+        raise ValueError(f"cannot compare embeddings of different lengths: {len(a)} vs {len(b)}")
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(y * y for y in b))

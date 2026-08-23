@@ -1,5 +1,7 @@
 import math
 
+import pytest
+
 from tabs.score.embeddings import EMBEDDING_MODEL, cosine_similarity, embed_text
 
 
@@ -50,3 +52,8 @@ def test_cosine_similarity_of_opposite_vectors_is_negative_one():
 
 def test_cosine_similarity_handles_a_zero_vector_without_dividing_by_zero():
     assert cosine_similarity([0.0, 0.0], [1.0, 1.0]) == 0.0
+
+
+def test_cosine_similarity_raises_on_mismatched_vector_lengths():
+    with pytest.raises(ValueError):
+        cosine_similarity([1.0, 0.0], [1.0, 0.0, 0.0])

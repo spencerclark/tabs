@@ -118,5 +118,10 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    existing_claim_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
+    }
+    if "embedding" not in existing_claim_columns:
+        conn.execute("ALTER TABLE claims ADD COLUMN embedding TEXT")
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()

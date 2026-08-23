@@ -129,10 +129,11 @@ def test_score_and_corroborate_claim_creates_a_story_cluster_on_first_corroborat
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
     source_id = _insert_source(conn)
+    other_source_id = _insert_source(conn, "other")
     article_a = _insert_article(conn, source_id, "https://source.example/a")
-    article_b = _insert_article(conn, source_id, "https://source.example/b")
+    article_b = _insert_article(conn, other_source_id, "https://other.example/b")
     existing_id = _insert_claim(
-        conn, article_b, source_id, claim_text="Existing claim", embedding=[1.0, 0.0],
+        conn, article_b, other_source_id, claim_text="Existing claim", embedding=[1.0, 0.0],
     )
     new_id = _insert_claim(conn, article_a, source_id, claim_text="New claim")
     client = _FakeClient(
@@ -158,12 +159,55 @@ def test_score_and_corroborate_claim_creates_a_story_cluster_on_first_corroborat
     conn.close()
 
 
+def test_score_and_corroborate_claim_joins_every_corroborating_candidate_not_just_the_best_match(tmp_path):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    source_id = _insert_source(conn, "source")
+    other_source_id = _insert_source(conn, "other")
+    third_source_id = _insert_source(conn, "third")
+    article_a = _insert_article(conn, source_id, "https://source.example/a")
+    article_b = _insert_article(conn, other_source_id, "https://other.example/b")
+    article_c = _insert_article(conn, third_source_id, "https://third.example/c")
+    existing_id_1 = _insert_claim(
+        conn, article_b, other_source_id, claim_text="Existing claim one", embedding=[1.0, 0.0],
+    )
+    existing_id_2 = _insert_claim(
+        conn, article_c, third_source_id, claim_text="Existing claim two", embedding=[0.99, 0.01],
+    )
+    new_id = _insert_claim(conn, article_a, source_id, claim_text="New claim")
+    client = _FakeClient(
+        MatchJudgments(
+            judgments=[
+                CandidateJudgment(candidate_claim_id=existing_id_1, relationship="corroborating"),
+                CandidateJudgment(candidate_claim_id=existing_id_2, relationship="corroborating"),
+            ]
+        )
+    )
+
+    score_and_corroborate_claim(conn, client, _FakeVoyageClient(), new_id)
+
+    rows = {
+        row["id"]: row for row in conn.execute(
+            "SELECT id, story_cluster_id, corroboration_count FROM claims"
+        ).fetchall()
+    }
+    cluster_ids = {rows[new_id]["story_cluster_id"], rows[existing_id_1]["story_cluster_id"],
+                   rows[existing_id_2]["story_cluster_id"]}
+    assert None not in cluster_ids
+    assert len(cluster_ids) == 1  # all three joined the SAME cluster
+    assert rows[new_id]["corroboration_count"] == 2
+    assert rows[existing_id_1]["corroboration_count"] == 2
+    assert rows[existing_id_2]["corroboration_count"] == 2
+    conn.close()
+
+
 def test_score_and_corroborate_claim_joins_an_existing_story_cluster(tmp_path):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
     source_id = _insert_source(conn)
+    other_source_id = _insert_source(conn, "other")
     article_a = _insert_article(conn, source_id, "https://source.example/a")
-    article_b = _insert_article(conn, source_id, "https://source.example/b")
+    article_b = _insert_article(conn, other_source_id, "https://other.example/b")
     conn.execute(
         "INSERT INTO story_clusters (category, summary, created_at) VALUES ('AppSec', NULL, ?)",
         (datetime.now(timezone.utc).isoformat(),),
@@ -171,7 +215,7 @@ def test_score_and_corroborate_claim_joins_an_existing_story_cluster(tmp_path):
     conn.commit()
     cluster_id = conn.execute("SELECT id FROM story_clusters").fetchone()["id"]
     existing_id = _insert_claim(
-        conn, article_b, source_id, claim_text="Existing claim", embedding=[1.0, 0.0],
+        conn, article_b, other_source_id, claim_text="Existing claim", embedding=[1.0, 0.0],
         story_cluster_id=cluster_id, corroboration_count=0,
     )
     new_id = _insert_claim(conn, article_a, source_id, claim_text="New claim")
@@ -223,11 +267,12 @@ def test_score_and_corroborate_claim_needs_review_conflict_does_not_force_misinf
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
     source_id = _insert_source(conn, institutional_tier=2, earned_tier=2)
+    other_source_id = _insert_source(conn, "other", institutional_tier=2, earned_tier=2)
     article_a = _insert_article(conn, source_id, "https://source.example/a")
-    article_b = _insert_article(conn, source_id, "https://source.example/b")
+    article_b = _insert_article(conn, other_source_id, "https://other.example/b")
     same_time = datetime.now(timezone.utc).isoformat()
     existing_id = _insert_claim(
-        conn, article_b, source_id, claim_text="Existing claim", embedding=[1.0, 0.0],
+        conn, article_b, other_source_id, claim_text="Existing claim", embedding=[1.0, 0.0],
         retrieved_at=same_time, corroboration_count=0,
     )
     new_id = _insert_claim(
@@ -255,10 +300,11 @@ def test_score_and_corroborate_claim_ignores_a_judgment_for_an_unoffered_candida
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
     source_id = _insert_source(conn)
+    other_source_id = _insert_source(conn, "other")
     article_a = _insert_article(conn, source_id, "https://source.example/a")
-    article_b = _insert_article(conn, source_id, "https://source.example/b")
+    article_b = _insert_article(conn, other_source_id, "https://other.example/b")
     existing_id = _insert_claim(
-        conn, article_b, source_id, claim_text="Existing claim", embedding=[1.0, 0.0],
+        conn, article_b, other_source_id, claim_text="Existing claim", embedding=[1.0, 0.0],
     )
     new_id = _insert_claim(conn, article_a, source_id, claim_text="New claim")
     client = _FakeClient(
@@ -300,9 +346,10 @@ def test_score_and_corroborate_claim_degrades_gracefully_when_judgment_fails(tmp
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
     source_id = _insert_source(conn)
+    other_source_id = _insert_source(conn, "other")
     article_a = _insert_article(conn, source_id, "https://source.example/a")
-    article_b = _insert_article(conn, source_id, "https://source.example/b")
-    _insert_claim(conn, article_b, source_id, claim_text="Existing claim", embedding=[1.0, 0.0])
+    article_b = _insert_article(conn, other_source_id, "https://other.example/b")
+    _insert_claim(conn, article_b, other_source_id, claim_text="Existing claim", embedding=[1.0, 0.0])
     new_id = _insert_claim(conn, article_a, source_id, claim_text="New claim")
 
     result = score_and_corroborate_claim(
