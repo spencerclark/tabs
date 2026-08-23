@@ -94,9 +94,14 @@ def test_find_candidate_claims_excludes_claims_from_the_same_article(tmp_path):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
     source_id = _insert_source(conn, "source")
+    other_source_id = _insert_source(conn, "other_source")
     article_id = _insert_article(conn, source_id, "https://source.example/a")
     new_claim_id = _insert_claim(conn, article_id, source_id, "New claim", embedding=[1.0, 0.0])
-    _insert_claim(conn, article_id, source_id, "Sibling claim, same article", embedding=[1.0, 0.0])
+    # Different source than the query's own source_id, so only the article exclusion
+    # (not the source exclusion) is what keeps this sibling out of the results.
+    _insert_claim(
+        conn, article_id, other_source_id, "Sibling claim, same article", embedding=[1.0, 0.0],
+    )
 
     candidates = find_candidate_claims(
         conn, claim_id=new_claim_id, article_id=article_id, source_id=source_id,
@@ -111,9 +116,10 @@ def test_find_candidate_claims_excludes_claims_below_the_similarity_threshold(tm
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
     source_id = _insert_source(conn, "source")
+    other_source_id = _insert_source(conn, "other_source")
     article_a = _insert_article(conn, source_id, "https://source.example/a")
-    article_b = _insert_article(conn, source_id, "https://source.example/b")
-    _insert_claim(conn, article_b, source_id, "Unrelated claim", embedding=[0.0, 1.0])
+    article_b = _insert_article(conn, other_source_id, "https://other-source.example/b")
+    _insert_claim(conn, article_b, other_source_id, "Unrelated claim", embedding=[0.0, 1.0])
 
     candidates = find_candidate_claims(
         conn, claim_id=999999, article_id=article_a, source_id=source_id,
@@ -128,13 +134,14 @@ def test_find_candidate_claims_excludes_claims_outside_the_recheck_window(tmp_pa
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
     source_id = _insert_source(conn, "source")
+    other_source_id = _insert_source(conn, "other_source")
     article_a = _insert_article(conn, source_id, "https://source.example/a")
-    article_b = _insert_article(conn, source_id, "https://source.example/b")
+    article_b = _insert_article(conn, other_source_id, "https://other-source.example/b")
     old_retrieved_at = (
         datetime.now(timezone.utc) - timedelta(days=CORROBORATION_WINDOW_DAYS + 1)
     ).isoformat()
     _insert_claim(
-        conn, article_b, source_id, "Old similar claim", embedding=[1.0, 0.0],
+        conn, article_b, other_source_id, "Old similar claim", embedding=[1.0, 0.0],
         retrieved_at=old_retrieved_at,
     )
 
@@ -151,10 +158,11 @@ def test_find_candidate_claims_excludes_a_different_category(tmp_path):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
     source_id = _insert_source(conn, "source")
+    other_source_id = _insert_source(conn, "other_source")
     article_a = _insert_article(conn, source_id, "https://source.example/a")
-    article_b = _insert_article(conn, source_id, "https://source.example/b")
+    article_b = _insert_article(conn, other_source_id, "https://other-source.example/b")
     _insert_claim(
-        conn, article_b, source_id, "Similar but different category",
+        conn, article_b, other_source_id, "Similar but different category",
         category="AI Security", embedding=[1.0, 0.0],
     )
 
