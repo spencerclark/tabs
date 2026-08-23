@@ -7,6 +7,7 @@ from tabs.curate.storage import store_extraction_result
 from tabs.curate.triage import triage_article
 from tabs.ingest.fetch import REQUEST_DELAY_SECONDS, FeedFetchError, fetch_feed
 from tabs.ingest.storage import fetch_article_text, store_article
+from tabs.score.storage import score_and_corroborate_claim
 
 RECENT_ARTICLE_WINDOW_DAYS = 14
 # SPEC §5.2: requests are rate-limited with a small delay between them. A feed yields
@@ -17,7 +18,7 @@ RECENT_ARTICLE_WINDOW_DAYS = 14
 ARTICLE_REQUEST_DELAY_SECONDS = REQUEST_DELAY_SECONDS
 
 
-def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
+def run_ingest(conn: sqlite3.Connection, client, voyage_client, sleep=time.sleep) -> dict:
     """Run one ingestion + curation pass over every allowlisted source. Returns a summary dict."""
     summary = {
         "sources_ok": 0,
@@ -33,6 +34,8 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
         "articles_uncurated": 0,
         "claims_extracted": 0,
         "perspectives_extracted": 0,
+        "claims_scored": 0,
+        "claims_unscored": 0,
     }
     any_article_fetched = False
     # Tracked outside `summary` (which is the operator-facing report) purely to detect a
@@ -193,6 +196,32 @@ def run_ingest(conn: sqlite3.Connection, client, sleep=time.sleep) -> dict:
                 continue
             summary["claims_extracted"] += counts["claims_created"]
             summary["perspectives_extracted"] += counts["perspectives_created"]
+
+            for new_claim_id in counts["claim_ids"]:
+                try:
+                    scoring_result = score_and_corroborate_claim(
+                        conn, client, voyage_client, new_claim_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 — one bad claim must not kill the run
+                    _log_run(
+                        conn, source["id"], "error",
+                        f"scoring failed: claim {new_claim_id}: {type(exc).__name__}: {exc}",
+                    )
+                    summary["claims_unscored"] += 1
+                    continue
+                summary["claims_scored"] += 1
+                if scoring_result.embedding_failed:
+                    _log_run(
+                        conn, source["id"], "error",
+                        f"embedding failed for claim {new_claim_id}: scored without a "
+                        "corroboration signal this round",
+                    )
+                if scoring_result.judgment_failed:
+                    _log_run(
+                        conn, source["id"], "error",
+                        f"corroboration judgment failed for claim {new_claim_id}: scored "
+                        "without it this round",
+                    )
 
         _record_success(conn, source["id"])
         summary["sources_ok"] += 1

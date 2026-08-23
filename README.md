@@ -40,3 +40,12 @@ detection, and story clustering are a later phase.
 If every Anthropic API call in a run fails (e.g. a missing or invalid API
 key), `tabs ingest` exits non-zero instead of silently reporting success —
 worth alerting on if you're running this under cron.
+
+Every extracted claim is then embedded (Voyage AI `voyage-4-lite`) and compared against
+recent same-category claims to detect corroboration and conflicts, producing a composite
+confidence score that gates each claim to `verified`, `unverified`, or `misinformation`
+(SPEC.md §6.3-6.4). Set `VOYAGE_API_KEY` in your environment alongside `ANTHROPIC_API_KEY`.
+Unlike a fully-broken Anthropic key, a fully-broken Voyage key does not currently fail the
+run — every claim is scored on its own tier/certainty/type merits without corroboration,
+logged per-claim in `run_log`, visible via the `claims_scored`/`claims_unscored` summary
+counts rather than a non-zero exit.

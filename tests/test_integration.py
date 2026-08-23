@@ -10,6 +10,7 @@ Anthropic client construction (anthropic.Anthropic itself is never invoked for r
 
 import feedparser
 import requests
+import voyageai
 from click.testing import CliRunner
 
 import tabs.commands.ingest_cmd as ingest_cmd_module
@@ -96,6 +97,18 @@ class _FakeAnthropicClient:
         self.messages = _FakeMessages()
 
 
+class _FakeVoyageClient:
+    def embed(self, **kwargs):
+        # deterministic, distinct-enough vectors so different claim texts don't collide
+        text = kwargs["texts"][0]
+        return _FakeVoyageEmbeddingsResult([[float(len(text) % 97), 0.0]])
+
+
+class _FakeVoyageEmbeddingsResult:
+    def __init__(self, embeddings):
+        self.embeddings = embeddings
+
+
 def _install_stubs(monkeypatch, pages: dict[str, bytes], fetched: list[str]):
     monkeypatch.setattr(feedparser, "parse", lambda url: _parsed_feed())
 
@@ -109,6 +122,7 @@ def _install_stubs(monkeypatch, pages: dict[str, bytes], fetched: list[str]):
     monkeypatch.setattr(orchestrator_module, "ARTICLE_REQUEST_DELAY_SECONDS", 0)
     # never make a real Anthropic API call
     monkeypatch.setattr(ingest_cmd_module.anthropic, "Anthropic", _FakeAnthropicClient)
+    monkeypatch.setattr(ingest_cmd_module.voyageai, "Client", _FakeVoyageClient)
 
 
 def _write_sources_yaml(tmp_path):
@@ -139,6 +153,8 @@ def test_ingest_command_end_to_end_stores_extracted_articles(tmp_path, monkeypat
     assert result.exit_code == 0, result.output
     assert "sources_ok=1 sources_failed=0 articles_stored=2" in result.output
     assert "claims_extracted=2" in result.output
+    assert "claims_scored=2" in result.output
+    assert "claims_unscored=0" in result.output
     assert fetched == [ARTICLE_A, ARTICLE_B]
 
     conn = get_connection(db_path)
@@ -166,7 +182,12 @@ def test_ingest_command_end_to_end_stores_extracted_articles(tmp_path, monkeypat
     # one factual claim extracted per article, via the fake client's canned response
     claim_rows = conn.execute("SELECT article_id, claim_text, status FROM claims").fetchall()
     assert len(claim_rows) == 2
-    assert all(row["status"] == "unverified" for row in claim_rows)  # not scored yet — Phase 2b's job
+    # tier 2, no corroboration, llm_certainty=0.85, factual: 2 + 0 + 1.7 + 1 = 4.7 >= 4.0
+    assert all(row["status"] == "verified" for row in claim_rows)
+    embedded_claim = conn.execute(
+        "SELECT embedding FROM claims WHERE embedding IS NOT NULL LIMIT 1"
+    ).fetchone()
+    assert embedded_claim is not None
 
     run_row = conn.execute(
         "SELECT status, message FROM run_log WHERE source_id IS NULL"
@@ -190,6 +211,8 @@ def test_ingest_command_end_to_end_is_idempotent_across_boilerplate_churn(tmp_pa
     assert first.exit_code == 0, first.output
     assert "articles_stored=2" in first.output
     assert "claims_extracted=2" in first.output
+    assert "claims_scored=2" in first.output
+    assert "claims_unscored=0" in first.output
 
     # second run: same article text, different ad/script tokens and whitespace, plus one
     # genuine edit to article B
@@ -208,6 +231,8 @@ def test_ingest_command_end_to_end_is_idempotent_across_boilerplate_churn(tmp_pa
     assert "articles_stored=1" in second.output
     # ...and only that one is re-curated
     assert "claims_extracted=1" in second.output
+    assert "claims_scored=1" in second.output
+    assert "claims_unscored=0" in second.output
 
     conn = get_connection(db_path)
     a_rows = conn.execute(

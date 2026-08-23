@@ -37,14 +37,23 @@ def _no_extraction(client, full_text, source_name):
     return ExtractionResult()
 
 
+def _scored_without_corroboration(conn, client, voyage_client, claim_id):
+    """Stand-in score_and_corroborate_claim that scores nothing new, for tests that
+    aren't specifically exercising Phase 2b's corroboration/scoring behavior."""
+    from tabs.score.storage import ScoringResult
+    return ScoringResult(status="unverified", embedding_failed=False, judgment_failed=False)
+
+
 def _install_default_curation_stubs(monkeypatch):
     monkeypatch.setattr(orchestrator_module, "triage_article", _always_in_scope)
     monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", _no_extraction)
+    monkeypatch.setattr(orchestrator_module, "score_and_corroborate_claim", _scored_without_corroboration)
 
 
 DEFAULT_SUMMARY_EXTRAS = {
     "articles_out_of_scope": 0, "articles_uncurated": 0,
     "claims_extracted": 0, "perspectives_extracted": 0,
+    "claims_scored": 0, "claims_unscored": 0,
 }
 
 
@@ -74,7 +83,7 @@ def test_run_ingest_delays_between_article_fetches_but_not_before_the_first(tmp_
         lambda url: calls.append(("fetch", url)) or "text for " + url,
     )
 
-    run_ingest(conn, client=None, sleep=lambda seconds: calls.append(("sleep", seconds)))
+    run_ingest(conn, client=None, voyage_client=None, sleep=lambda seconds: calls.append(("sleep", seconds)))
 
     # three article fetches, two delays: never before the first request of the run
     assert calls == [
@@ -97,7 +106,7 @@ def test_run_ingest_records_a_run_scoped_success_row_even_with_zero_errors(tmp_p
     _install_default_curation_stubs(monkeypatch)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     row = conn.execute(
         "SELECT run_started_at, run_finished_at, source_id, status, message "
@@ -120,7 +129,7 @@ def test_run_ingest_records_the_run_scoped_row_even_when_a_source_fails(tmp_path
 
     monkeypatch.setattr(orchestrator_module, "fetch_feed", fake_fetch_feed)
 
-    run_ingest(conn, client=None, sleep=_no_sleep)
+    run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     run_rows = conn.execute("SELECT status FROM run_log WHERE source_id IS NULL").fetchall()
     assert len(run_rows) == 1
@@ -142,7 +151,7 @@ def test_run_ingest_stores_articles_and_records_success(tmp_path, monkeypatch):
     _install_default_curation_stubs(monkeypatch)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     assert summary == {
         "sources_ok": 1, "sources_failed": 0, "articles_stored": 1, **DEFAULT_SUMMARY_EXTRAS,
@@ -172,7 +181,7 @@ def test_run_ingest_skips_failing_source_and_continues(tmp_path, monkeypatch):
     _install_default_curation_stubs(monkeypatch)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     assert summary == {
         "sources_ok": 1, "sources_failed": 1, "articles_stored": 1, **DEFAULT_SUMMARY_EXTRAS,
@@ -208,7 +217,7 @@ def test_run_ingest_skips_previously_ingested_urls_outside_recheck_window(tmp_pa
         lambda url: fetch_calls.append(url) or "text",
     )
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     assert fetch_calls == []  # old article, outside the 14-day re-check window: not re-fetched
     assert summary["articles_stored"] == 0
@@ -247,7 +256,7 @@ def test_run_ingest_refetches_previously_ingested_urls_inside_recheck_window(tmp
         lambda url: fetch_calls.append(url) or "text",
     )
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     # recent article, inside the 14-day re-check window: must be re-fetched to detect edits/retractions
     assert fetch_calls == ["https://s.example/recent"]
@@ -285,7 +294,7 @@ def test_run_ingest_stores_new_version_when_recheck_finds_changed_content(tmp_pa
 
     monkeypatch.setattr(orchestrator_module, "triage_article", refusing_triage)
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     assert summary["articles_stored"] == 1
     assert summary["articles_out_of_scope"] == 0
@@ -309,8 +318,8 @@ def test_run_ingest_reports_zero_stored_on_second_run_over_unchanged_content(tmp
         lambda url: "<html><body><p>Same   article body.</p></body></html>",
     )
 
-    first = run_ingest(conn, client=None, sleep=_no_sleep)
-    second = run_ingest(conn, client=None, sleep=_no_sleep)
+    first = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
+    second = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     assert first["articles_stored"] == 1
     # the article is inside the re-check window and is re-fetched, but the content is
@@ -350,7 +359,7 @@ def test_run_ingest_continues_when_store_article_fails_for_one_entry(tmp_path, m
 
     monkeypatch.setattr(orchestrator_module, "store_article", fake_store_article)
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     # the failing store must not abort the run: the second entry in source A and all of
     # source B must still be processed.
@@ -391,7 +400,7 @@ def test_run_ingest_skips_out_of_scope_articles_without_fetching_them(tmp_path, 
         lambda url: fetch_calls.append(url) or "text",
     )
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     # out-of-scope articles are never fetched or stored — triage runs on the cheap
     # feed-level title/summary before any HTTP fetch of the article body
@@ -400,6 +409,7 @@ def test_run_ingest_skips_out_of_scope_articles_without_fetching_them(tmp_path, 
         "sources_ok": 1, "sources_failed": 0, "articles_stored": 0,
         "articles_out_of_scope": 1, "articles_uncurated": 0,
         "claims_extracted": 0, "perspectives_extracted": 0,
+        "claims_scored": 0, "claims_unscored": 0,
     }
     assert conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"] == 0
     conn.close()
@@ -423,7 +433,7 @@ def test_run_ingest_continues_when_triage_fails_for_one_entry(tmp_path, monkeypa
     monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", _no_extraction)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     # the failing triage call must not abort the run: the second entry must still be processed
     assert summary["articles_stored"] == 1
@@ -463,7 +473,7 @@ def test_run_ingest_continues_when_triage_returns_no_parsed_output(tmp_path, mon
     monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", _no_extraction)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     # the refused entry is skipped, but the rest of source A and all of source B run
     assert summary["articles_stored"] == 2
@@ -498,7 +508,7 @@ def test_run_ingest_continues_when_extraction_returns_no_parsed_output(tmp_path,
         lambda client, full_text, source_name: None,
     )
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     # the article itself is still stored — only its curation was refused
     assert summary["articles_stored"] == 1
@@ -542,7 +552,7 @@ def test_run_ingest_triages_only_entries_it_has_never_seen_before(tmp_path, monk
 
     monkeypatch.setattr(orchestrator_module, "triage_article", tracking_triage)
 
-    run_ingest(conn, client=None, sleep=_no_sleep)
+    run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     # the in-window re-check is not re-triaged; the genuinely new entry is
     assert triage_calls == ["New"]
@@ -572,7 +582,7 @@ def test_run_ingest_raises_when_every_triage_call_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
     with pytest.raises(RuntimeError, match="every Anthropic API call failed"):
-        run_ingest(conn, client=None, sleep=_no_sleep)
+        run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     # the run-completion row is still written before the failure is raised: the run did
     # happen, and its per-article error rows need the run-scoped row for context
@@ -599,7 +609,7 @@ def test_run_ingest_raises_when_every_triage_call_returns_no_parsed_output(tmp_p
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
     with pytest.raises(RuntimeError, match="every Anthropic API call failed"):
-        run_ingest(conn, client=None, sleep=_no_sleep)
+        run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
     conn.close()
 
 
@@ -624,7 +634,7 @@ def test_run_ingest_does_not_raise_when_only_some_triage_calls_fail(tmp_path, mo
     monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", _no_extraction)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)  # must not raise
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)  # must not raise
 
     assert summary["articles_stored"] == 1
     conn.close()
@@ -642,7 +652,7 @@ def test_run_ingest_does_not_raise_when_triage_is_never_attempted(tmp_path, monk
 
     monkeypatch.setattr(orchestrator_module, "triage_article", never_called_triage)
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)  # must not raise
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)  # must not raise
 
     assert summary["articles_stored"] == 0
     assert summary["sources_ok"] == 1
@@ -659,7 +669,7 @@ def test_run_ingest_does_not_raise_when_all_triage_calls_succeed(tmp_path, monke
     _install_default_curation_stubs(monkeypatch)
     monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)  # must not raise
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)  # must not raise
 
     assert summary["articles_stored"] == 1
     conn.close()
@@ -679,7 +689,7 @@ def test_run_ingest_does_not_raise_when_all_triage_calls_succeed_as_out_of_scope
         lambda client, title, summary, source_category: TriageResult(in_scope=False),
     )
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)  # must not raise
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)  # must not raise
 
     assert summary["articles_out_of_scope"] == 1
     conn.close()
@@ -734,7 +744,7 @@ def test_run_ingest_does_not_raise_when_a_failed_triage_call_is_offset_by_a_succ
 
     # must not raise: the re-checked entry's extraction call succeeded on the same client,
     # proving the client itself is not broken — only the "New" entry's triage call failed
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     assert summary["claims_extracted"] == 1
     conn.close()
@@ -779,7 +789,7 @@ def test_run_ingest_raises_when_the_only_calls_this_run_are_failing_extractions(
     monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", failing_extraction)
 
     with pytest.raises(RuntimeError, match="every Anthropic API call failed"):
-        run_ingest(conn, client=None, sleep=_no_sleep)
+        run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     assert triage_calls == []
     conn.close()
@@ -824,7 +834,7 @@ def test_run_ingest_does_not_raise_when_the_only_entry_is_rejected_for_being_ove
     monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", oversized_extraction)
 
     # must not raise: this is a local rejection, not evidence the client is broken
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     assert triage_calls == []
     assert summary["articles_stored"] == 1
@@ -874,7 +884,7 @@ def test_run_ingest_raises_when_the_only_call_is_a_genuine_schema_validation_fai
     )
 
     with pytest.raises(RuntimeError, match="every Anthropic API call failed"):
-        run_ingest(conn, client=None, sleep=_no_sleep)
+        run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
     conn.close()
 
 
@@ -915,7 +925,7 @@ def test_run_ingest_extracts_claims_and_perspectives_for_a_stored_article(tmp_pa
         lambda client, full_text, source_name: extraction_result,
     )
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     assert summary["claims_extracted"] == 2
     assert summary["perspectives_extracted"] == 1
@@ -951,8 +961,8 @@ def test_run_ingest_skips_extraction_when_content_is_unchanged(tmp_path, monkeyp
 
     monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", tracking_extraction)
 
-    run_ingest(conn, client=None, sleep=_no_sleep)  # first run: content is new
-    run_ingest(conn, client=None, sleep=_no_sleep)  # second run: unchanged content
+    run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)  # first run: content is new
+    run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)  # second run: unchanged content
 
     # extraction must run once, not twice — re-curating unchanged content wastes API calls
     assert extraction_calls == ["full text"]
@@ -974,7 +984,7 @@ def test_run_ingest_continues_when_extraction_fails_for_one_entry(tmp_path, monk
 
     monkeypatch.setattr(orchestrator_module, "extract_claims_and_perspectives", failing_extraction)
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     # the article itself is still stored — only its curation failed
     assert summary["articles_stored"] == 1
@@ -1016,11 +1026,11 @@ def test_run_ingest_rolls_back_partial_curation_writes_when_the_store_fails(tmp_
                 (article_id, source_id, retrieved_at, retrieved_at),
             )
             raise sqlite3.OperationalError("database is locked")
-        return {"claims_created": 0, "perspectives_created": 0}
+        return {"claims_created": 0, "perspectives_created": 0, "claim_ids": []}
 
     monkeypatch.setattr(orchestrator_module, "store_extraction_result", half_written_store)
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     # the half-written claim must not survive: it was rolled back, not committed by the
     # error-logging path that follows it
@@ -1067,7 +1077,7 @@ def test_run_ingest_continues_when_curation_store_fails_for_one_entry(tmp_path, 
 
     monkeypatch.setattr(orchestrator_module, "store_extraction_result", fake_store_extraction_result)
 
-    summary = run_ingest(conn, client=None, sleep=_no_sleep)
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
 
     # the failing curation store must not abort the run: the second entry in source A and
     # all of source B must still be processed.
@@ -1091,4 +1101,132 @@ def test_run_ingest_continues_when_curation_store_fails_for_one_entry(tmp_path, 
     )
     article_row = conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()
     assert article_row["n"] == 3
+    conn.close()
+
+
+def test_run_ingest_scores_each_newly_created_claim(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    entry = FetchedEntry(url="https://s.example/a", title="A", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    monkeypatch.setattr(orchestrator_module, "triage_article", _always_in_scope)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
+    monkeypatch.setattr(
+        orchestrator_module,
+        "extract_claims_and_perspectives",
+        lambda client, full_text, source_name: ExtractionResult(
+            items=[
+                ExtractedItem(
+                    text="Claim one", supporting_excerpt="q", item_type="factual",
+                    category="AppSec", sub_tags=[], llm_certainty=0.8,
+                ),
+                ExtractedItem(
+                    text="Claim two", supporting_excerpt="q", item_type="factual",
+                    category="AppSec", sub_tags=[], llm_certainty=0.6,
+                ),
+            ]
+        ),
+    )
+    scored_claim_ids = []
+
+    def tracking_score(conn, client, voyage_client, claim_id):
+        scored_claim_ids.append(claim_id)
+        from tabs.score.storage import ScoringResult
+        return ScoringResult(status="unverified", embedding_failed=False, judgment_failed=False)
+
+    monkeypatch.setattr(orchestrator_module, "score_and_corroborate_claim", tracking_score)
+
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
+
+    assert len(scored_claim_ids) == 2
+    assert summary["claims_scored"] == 2
+    assert summary["claims_unscored"] == 0
+    conn.close()
+
+
+def test_run_ingest_continues_when_scoring_fails_for_one_claim(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    entry = FetchedEntry(url="https://s.example/a", title="A", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    monkeypatch.setattr(orchestrator_module, "triage_article", _always_in_scope)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
+    monkeypatch.setattr(
+        orchestrator_module,
+        "extract_claims_and_perspectives",
+        lambda client, full_text, source_name: ExtractionResult(
+            items=[
+                ExtractedItem(
+                    text="Claim one", supporting_excerpt="q", item_type="factual",
+                    category="AppSec", sub_tags=[], llm_certainty=0.8,
+                ),
+                ExtractedItem(
+                    text="Claim two", supporting_excerpt="q", item_type="factual",
+                    category="AppSec", sub_tags=[], llm_certainty=0.6,
+                ),
+            ]
+        ),
+    )
+
+    def failing_then_ok_score(conn, client, voyage_client, claim_id):
+        if claim_id == 1:
+            raise RuntimeError("simulated scoring failure")
+        from tabs.score.storage import ScoringResult
+        return ScoringResult(status="unverified", embedding_failed=False, judgment_failed=False)
+
+    monkeypatch.setattr(orchestrator_module, "score_and_corroborate_claim", failing_then_ok_score)
+
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
+
+    # the failing claim's scoring doesn't stop the second claim from being scored
+    assert summary["claims_scored"] == 1
+    assert summary["claims_unscored"] == 1
+    error_rows = conn.execute(
+        "SELECT message FROM run_log WHERE status = 'error'"
+    ).fetchall()
+    assert any("scoring failed: claim 1" in row["message"] for row in error_rows)
+    conn.close()
+
+
+def test_run_ingest_logs_but_still_counts_a_claim_scored_with_a_failed_embedding(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    _insert_source(conn, "Source", "https://s.example/feed")
+
+    entry = FetchedEntry(url="https://s.example/a", title="A", published_at=None, summary="s")
+    monkeypatch.setattr(orchestrator_module, "fetch_feed", lambda feed_url: [entry])
+    monkeypatch.setattr(orchestrator_module, "triage_article", _always_in_scope)
+    monkeypatch.setattr(orchestrator_module, "fetch_article_text", lambda url: "full text")
+    monkeypatch.setattr(
+        orchestrator_module,
+        "extract_claims_and_perspectives",
+        lambda client, full_text, source_name: ExtractionResult(
+            items=[
+                ExtractedItem(
+                    text="Claim one", supporting_excerpt="q", item_type="factual",
+                    category="AppSec", sub_tags=[], llm_certainty=0.8,
+                ),
+            ]
+        ),
+    )
+
+    def degraded_score(conn, client, voyage_client, claim_id):
+        from tabs.score.storage import ScoringResult
+        return ScoringResult(status="unverified", embedding_failed=True, judgment_failed=False)
+
+    monkeypatch.setattr(orchestrator_module, "score_and_corroborate_claim", degraded_score)
+
+    summary = run_ingest(conn, client=None, voyage_client=None, sleep=_no_sleep)
+
+    # a degraded-but-successful scoring still counts as scored, not unscored
+    assert summary["claims_scored"] == 1
+    assert summary["claims_unscored"] == 0
+    error_rows = conn.execute(
+        "SELECT message FROM run_log WHERE status = 'error'"
+    ).fetchall()
+    assert any("embedding failed for claim" in row["message"] for row in error_rows)
     conn.close()
