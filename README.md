@@ -34,8 +34,9 @@ claims and perspectives out of any article that's newly stored — either a
 brand-new in-scope article, or a previously-ingested one whose content
 actually changed on a re-check. Set `ANTHROPIC_API_KEY` in your environment
 before running `tabs ingest` (see Anthropic's documentation for how to obtain
-a key). Claims land in an `unverified` state — confidence scoring, conflict
-detection, and story clustering are a later phase.
+a key). Every extracted claim then goes through corroboration/conflict scoring
+(see below) before landing in its final `verified`/`unverified`/`misinformation`
+state.
 
 If every Anthropic API call in a run fails (e.g. a missing or invalid API
 key), `tabs ingest` exits non-zero instead of silently reporting success —
