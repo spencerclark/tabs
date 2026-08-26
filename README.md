@@ -34,9 +34,20 @@ claims and perspectives out of any article that's newly stored — either a
 brand-new in-scope article, or a previously-ingested one whose content
 actually changed on a re-check. Set `ANTHROPIC_API_KEY` in your environment
 before running `tabs ingest` (see Anthropic's documentation for how to obtain
-a key). Claims land in an `unverified` state — confidence scoring, conflict
-detection, and story clustering are a later phase.
+a key). Every extracted claim then goes through corroboration/conflict scoring
+(see below) before landing in its final `verified`/`unverified`/`misinformation`
+state.
 
 If every Anthropic API call in a run fails (e.g. a missing or invalid API
 key), `tabs ingest` exits non-zero instead of silently reporting success —
 worth alerting on if you're running this under cron.
+
+Every extracted claim is then embedded (Voyage AI `voyage-4-lite`) and compared against
+recent same-category claims to detect corroboration and conflicts, producing a composite
+confidence score that gates each claim to `verified`, `unverified`, or `misinformation`
+(SPEC.md §6.3-6.4). Set `VOYAGE_API_KEY` in your environment alongside `ANTHROPIC_API_KEY`.
+Unlike a fully-broken Anthropic key, a fully-broken Voyage key does not currently fail the
+run — every claim is still scored on its own tier/certainty/type merits without a
+corroboration signal. This shows up per-claim in `run_log` ("embedding failed for claim
+..."), not in the `claims_scored`/`claims_unscored` summary counts: a degraded-but-successful
+scoring still counts as scored, so those counters look identical to a fully healthy run.

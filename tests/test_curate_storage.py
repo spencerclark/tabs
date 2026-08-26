@@ -41,7 +41,13 @@ def test_store_extraction_result_routes_factual_and_prediction_items_to_claims(t
         extraction=extraction,
     )
 
-    assert counts == {"claims_created": 2, "perspectives_created": 0}
+    assert counts["claims_created"] == 2
+    assert counts["perspectives_created"] == 0
+    assert len(counts["claim_ids"]) == 2
+    db_claim_ids = {
+        row["id"] for row in conn.execute("SELECT id FROM claims").fetchall()
+    }
+    assert set(counts["claim_ids"]) == db_claim_ids
     rows = conn.execute(
         "SELECT claim_text, claim_type, category, sub_tags, llm_certainty, author, "
         "status, published_at, retrieved_at, article_id, source_id, supporting_excerpt "
@@ -87,7 +93,7 @@ def test_store_extraction_result_routes_opinion_items_to_perspectives(tmp_path):
         extraction=extraction,
     )
 
-    assert counts == {"claims_created": 0, "perspectives_created": 1}
+    assert counts == {"claims_created": 0, "perspectives_created": 1, "claim_ids": []}
     row = conn.execute(
         "SELECT perspective_text, category, sub_tags, author, article_id, source_id, "
         "supporting_excerpt, published_at, retrieved_at "

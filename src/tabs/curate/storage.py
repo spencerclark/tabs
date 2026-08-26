@@ -19,10 +19,14 @@ def store_extraction_result(
     `status='unverified'` — confidence scoring and gating are Phase 2b's job, once
     corroboration counts are computable). Opinion items go to `perspectives`, which has
     no status/confidence columns at all — perspectives are never truth-gated (SPEC §4.1).
+
+    Returns claim_ids so callers can run corroboration/scoring on exactly the claims just
+    created.
     """
     created_at = datetime.now(timezone.utc).isoformat()
     claims_created = 0
     perspectives_created = 0
+    claim_ids = []
 
     for item in extraction.items:
         sub_tags_json = json.dumps(item.sub_tags)
@@ -42,7 +46,7 @@ def store_extraction_result(
             )
             perspectives_created += 1
         else:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO claims
                     (article_id, source_id, claim_text, supporting_excerpt, claim_type,
@@ -56,6 +60,7 @@ def store_extraction_result(
                     item.author, published_at, retrieved_at, created_at,
                 ),
             )
+            claim_ids.append(cursor.lastrowid)
             claims_created += 1
 
     if extraction.injection_anomaly:
@@ -65,4 +70,8 @@ def store_extraction_result(
         )
 
     conn.commit()
-    return {"claims_created": claims_created, "perspectives_created": perspectives_created}
+    return {
+        "claims_created": claims_created,
+        "perspectives_created": perspectives_created,
+        "claim_ids": claim_ids,
+    }

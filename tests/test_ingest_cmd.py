@@ -1,6 +1,7 @@
 import sqlite3
 
 import pytest
+import voyageai
 from click.testing import CliRunner
 
 import tabs.commands.ingest_cmd as ingest_cmd_module
@@ -21,10 +22,11 @@ def test_ingest_command_syncs_sources_and_runs_ingest(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ingest_cmd_module,
         "run_ingest",
-        lambda conn, client: {
+        lambda conn, client, voyage_client: {
             "sources_ok": 1, "sources_failed": 0, "articles_stored": 3,
             "articles_out_of_scope": 1, "articles_uncurated": 4,
             "claims_extracted": 5, "perspectives_extracted": 2,
+            "claims_scored": 4, "claims_unscored": 1,
         },
     )
 
@@ -40,6 +42,8 @@ def test_ingest_command_syncs_sources_and_runs_ingest(tmp_path, monkeypatch):
     assert "articles_uncurated=4" in result.output
     assert "claims_extracted=5" in result.output
     assert "perspectives_extracted=2" in result.output
+    assert "claims_scored=4" in result.output
+    assert "claims_unscored=1" in result.output
 
     conn = get_connection(db_path)
     source_row = conn.execute("SELECT COUNT(*) AS n FROM sources").fetchone()
@@ -108,7 +112,7 @@ def test_ingest_command_closes_the_connection_when_the_command_body_raises(tmp_p
 
     monkeypatch.setattr(ingest_cmd_module, "get_connection", tracking_get_connection)
 
-    def boom(conn, client):
+    def boom(conn, client, voyage_client):
         raise RuntimeError("unexpected mid-command failure")
 
     monkeypatch.setattr(ingest_cmd_module, "run_ingest", boom)
@@ -137,15 +141,19 @@ def test_ingest_command_constructs_and_passes_an_anthropic_client(tmp_path, monk
 
     fake_client = object()
     monkeypatch.setattr(ingest_cmd_module.anthropic, "Anthropic", lambda: fake_client)
+    fake_voyage_client = object()
+    monkeypatch.setattr(ingest_cmd_module.voyageai, "Client", lambda: fake_voyage_client)
 
     received = {}
 
-    def fake_run_ingest(conn, client):
+    def fake_run_ingest(conn, client, voyage_client):
         received["client"] = client
+        received["voyage_client"] = voyage_client
         return {
             "sources_ok": 0, "sources_failed": 0, "articles_stored": 0,
             "articles_out_of_scope": 0, "articles_uncurated": 0,
             "claims_extracted": 0, "perspectives_extracted": 0,
+            "claims_scored": 0, "claims_unscored": 0,
         }
 
     monkeypatch.setattr(ingest_cmd_module, "run_ingest", fake_run_ingest)
@@ -157,3 +165,4 @@ def test_ingest_command_constructs_and_passes_an_anthropic_client(tmp_path, monk
 
     assert result.exit_code == 0, result.output
     assert received["client"] is fake_client
+    assert received["voyage_client"] is fake_voyage_client

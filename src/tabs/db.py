@@ -4,7 +4,7 @@ from pathlib import Path
 # Bumped whenever the schema below changes in a way that needs a migration, so drift
 # between an existing database file and this file can be detected instead of silently
 # producing confusing errors later.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS claims (
     author TEXT,
     published_at TEXT,
     retrieved_at TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    embedding TEXT
 );
 
 CREATE TABLE IF NOT EXISTS perspectives (
@@ -67,6 +68,10 @@ CREATE TABLE IF NOT EXISTS perspectives (
     retrieved_at TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+-- score.matching's candidate retrieval filters claims by category and a retrieved_at
+-- recency cutoff, once per newly-extracted claim.
+CREATE INDEX IF NOT EXISTS idx_claims_category_retrieved_at ON claims(category, retrieved_at);
 
 CREATE TABLE IF NOT EXISTS conflicts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,5 +118,10 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    existing_claim_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
+    }
+    if "embedding" not in existing_claim_columns:
+        conn.execute("ALTER TABLE claims ADD COLUMN embedding TEXT")
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
