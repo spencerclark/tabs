@@ -141,9 +141,9 @@ Given the domain (AI security), ingested content is a live injection surface (a 
 
 ## 7. Trend & Notable Story Detection
 
-- **Notable stories**: story clusters (§6.3) ranked by corroboration count and recency within a window.
-- **Trends**: per-category/sub-tag volume tracked over rolling windows (e.g. current week vs. trailing 4-week average); a category/tag whose volume spikes significantly is flagged. Like the confidence threshold, "significant" is a tunable parameter (e.g. a percentage-change floor with a minimum volume guard to avoid noise from low-volume tags), not a value fixed by this spec.
-- Surfaced two ways: automatically as a section in the scheduled digest, and on demand via `tabs trends [--since <window>]`.
+- **Notable stories**: story clusters (§6.3) ranked by corroboration count and recency within a window; claims with `misinformation` status are excluded from ranking, so a debunked claim can't inflate a cluster's prominence.
+- **Trends**: per-category/sub-tag volume tracked over rolling windows (e.g. current week vs. trailing 4-week average); a category/tag whose volume spikes significantly is flagged. Both claims and perspectives count toward volume — perspectives are never truth-gated so they always count, while claims with `misinformation` status are excluded, matching notable-story ranking. Like the confidence threshold, "significant" is a tunable parameter (e.g. a percentage-change floor with a minimum volume guard to avoid noise from low-volume tags), not a value fixed by this spec. Volume/spike numbers are computed on demand from the existing tables at query time — no separate precomputed trend-tracking table.
+- Surfaced two ways: automatically as a section in the scheduled digest, and on demand via `tabs trends [--since <window>]`. The initial implementation phase covers `tabs trends` only; wiring trends into the scheduled digest is deferred until digest generation itself is built.
 
 ## 8. Storage & Search
 
