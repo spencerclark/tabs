@@ -4,7 +4,7 @@ from pathlib import Path
 # Bumped whenever the schema below changes in a way that needs a migration, so drift
 # between an existing database file and this file can be detected instead of silently
 # producing confusing errors later.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -68,6 +68,11 @@ CREATE TABLE IF NOT EXISTS perspectives (
     retrieved_at TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+-- trends.volume's category/sub-tag aggregation filters perspectives by category and a
+-- retrieved_at window, mirroring claims' existing idx_claims_category_retrieved_at.
+CREATE INDEX IF NOT EXISTS idx_perspectives_category_retrieved_at
+    ON perspectives(category, retrieved_at);
 
 -- score.matching's candidate retrieval filters claims by category and a retrieved_at
 -- recency cutoff, once per newly-extracted claim.
