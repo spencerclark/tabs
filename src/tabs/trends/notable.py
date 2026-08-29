@@ -18,11 +18,16 @@ def notable_stories(
     """Story clusters with at least one non-misinformation claim retrieved within the
     last `since_days` days, ranked by corroboration count then recency (SPEC §7).
 
-    corroboration_count is read directly from claims.corroboration_count — maintained by
+    corroboration_count is read as-is from claims.corroboration_count — maintained by
     Phase 2b's score/storage.py._join_story_cluster — rather than recomputed here, so
     there stays one existing definition of "how corroborated is this cluster," not two
-    that could drift apart. Every non-misinformation member of a cluster shares the same
-    corroboration_count value, so MAX() just reads it out of the grouped rows.
+    that could drift apart. This function does not filter or adjust that value: the
+    column currently counts ALL cluster members, including any with
+    status='misinformation' (Phase 2b's _join_story_cluster does not exclude them from
+    the count). So a cluster containing some debunked claims may display a
+    corroboration_count slightly higher than its number of currently-non-misinformation
+    members. This is a known, documented limitation carried over from Phase 2b, not a
+    bug in this function.
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=since_days)).isoformat()
     rows = conn.execute(

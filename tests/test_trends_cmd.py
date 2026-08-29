@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 import click
@@ -7,6 +8,7 @@ from click.testing import CliRunner
 from tabs.cli import main
 from tabs.commands.trends_cmd import parse_since
 from tabs.db import get_connection, init_db
+from tabs.trends.spikes import MIN_VOLUME_GUARD
 
 
 def _insert_source(conn, name="source"):
@@ -39,16 +41,19 @@ def _insert_cluster(conn, category="AppSec"):
     return cursor.lastrowid
 
 
-def _insert_claim(conn, article_id, source_id, category, claim_text, story_cluster_id, corroboration_count):
+def _insert_claim(
+    conn, article_id, source_id, category, claim_text, story_cluster_id, corroboration_count,
+    sub_tags=None,
+):
     retrieved_at = datetime.now(timezone.utc).isoformat()
     conn.execute(
         "INSERT INTO claims (article_id, source_id, claim_text, supporting_excerpt, "
         "claim_type, category, sub_tags, status, llm_certainty, corroboration_count, "
         "story_cluster_id, retrieved_at, created_at) "
-        "VALUES (?, ?, ?, 'excerpt', 'factual', ?, '[]', 'verified', 0.5, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, 'excerpt', 'factual', ?, ?, 'verified', 0.5, ?, ?, ?, ?)",
         (
-            article_id, source_id, claim_text, category, corroboration_count,
-            story_cluster_id, retrieved_at, retrieved_at,
+            article_id, source_id, claim_text, category, json.dumps(sub_tags or []),
+            corroboration_count, story_cluster_id, retrieved_at, retrieved_at,
         ),
     )
     conn.commit()
@@ -114,3 +119,24 @@ def test_trends_command_rejects_a_malformed_since_value_cleanly(tmp_path):
 
     assert result.exit_code != 0
     assert "Traceback" not in result.output
+
+
+def test_trends_command_renders_a_spike_line_for_a_brand_new_sub_tag(tmp_path):
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_db(conn)
+    source_id = _insert_source(conn)
+    article_id = _insert_article(conn, source_id, "https://source.example/a")
+    cluster_id = _insert_cluster(conn)
+    for i in range(MIN_VOLUME_GUARD):
+        _insert_claim(
+            conn, article_id, source_id, "AppSec", f"Claim {i}", cluster_id,
+            corroboration_count=1, sub_tags=["Supply Chain"],
+        )
+    conn.close()
+
+    result = CliRunner().invoke(main, ["--db-path", str(db_path), "trends"])
+
+    assert result.exit_code == 0, result.output
+    assert "Supply Chain" in result.output
+    assert "new" in result.output

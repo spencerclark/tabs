@@ -29,21 +29,25 @@ def sub_tag_volume(conn: sqlite3.Connection, start: str, end: str) -> dict[tuple
     (category, sub_tag).
 
     sub_tags is a JSON array column; json_each expands it so an item tagged with several
-    sub_tags contributes to each one's count. COALESCE guards a NULL sub_tags value (the
-    column is nullable) — json_each(NULL) would otherwise error. Same misinformation
-    exclusion as category_volume.
+    sub_tags contributes to each one's count. The CASE guards both a NULL sub_tags value
+    (the column is nullable) and an actually-invalid JSON value — json_each(NULL) or
+    json_each(<malformed JSON>) would otherwise raise sqlite3.OperationalError and abort
+    the whole `tabs trends` command for one bad row. Same misinformation exclusion as
+    category_volume.
     """
     counts: dict[tuple[str, str], int] = {}
     _accumulate_tags(counts, conn.execute(
         "SELECT category, je.value AS sub_tag, COUNT(*) AS n "
-        "FROM claims, json_each(COALESCE(claims.sub_tags, '[]')) AS je "
+        "FROM claims, json_each(CASE WHEN json_valid(claims.sub_tags) THEN claims.sub_tags "
+        "ELSE '[]' END) AS je "
         "WHERE status != 'misinformation' AND retrieved_at >= ? AND retrieved_at < ? "
         "GROUP BY category, je.value",
         (start, end),
     ).fetchall())
     _accumulate_tags(counts, conn.execute(
         "SELECT category, je.value AS sub_tag, COUNT(*) AS n "
-        "FROM perspectives, json_each(COALESCE(perspectives.sub_tags, '[]')) AS je "
+        "FROM perspectives, json_each(CASE WHEN json_valid(perspectives.sub_tags) "
+        "THEN perspectives.sub_tags ELSE '[]' END) AS je "
         "WHERE retrieved_at >= ? AND retrieved_at < ? GROUP BY category, je.value",
         (start, end),
     ).fetchall())

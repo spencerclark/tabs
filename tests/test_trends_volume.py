@@ -108,6 +108,21 @@ def test_category_volume_excludes_items_outside_the_window(tmp_path):
     conn.close()
 
 
+def test_category_volume_window_is_half_open_at_the_end_boundary(tmp_path):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    source_id = _insert_source(conn)
+    article_id = _insert_article(conn, source_id, "https://source.example/a")
+    start, end = _window()
+    _insert_claim(conn, article_id, source_id, category="AppSec", retrieved_at=start)
+    _insert_claim(conn, article_id, source_id, category="AppSec", retrieved_at=end)
+
+    counts = category_volume(conn, start, end)
+
+    assert counts == {"AppSec": 1}
+    conn.close()
+
+
 def test_sub_tag_volume_counts_each_tag_on_a_multi_tagged_item(tmp_path):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)

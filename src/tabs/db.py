@@ -69,8 +69,12 @@ CREATE TABLE IF NOT EXISTS perspectives (
     created_at TEXT NOT NULL
 );
 
--- trends.volume's category/sub-tag aggregation filters perspectives by category and a
--- retrieved_at window, mirroring claims' existing idx_claims_category_retrieved_at.
+-- Covers trends.volume's category_volume(), whose perspectives query is a pure
+-- GROUP BY category (no sub_tags column involved) restricted to a retrieved_at window —
+-- this index lets that query be answered from the index alone, mirroring claims'
+-- existing idx_claims_category_retrieved_at. sub_tag_volume()'s perspectives query does
+-- NOT benefit from it the same way: it also needs the sub_tags column, so it scans
+-- regardless of this index.
 CREATE INDEX IF NOT EXISTS idx_perspectives_category_retrieved_at
     ON perspectives(category, retrieved_at);
 

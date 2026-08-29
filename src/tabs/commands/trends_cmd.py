@@ -8,6 +8,7 @@ from tabs.trends.spikes import detect_spikes
 
 DEFAULT_SINCE = "7d"
 DEFAULT_LIMIT = 10
+SAMPLE_CLAIM_TEXT_MAX_CHARS = 200
 
 _SINCE_PATTERN = re.compile(r"^(\d+)d$")
 
@@ -33,19 +34,22 @@ def parse_since(value: str) -> int:
 @click.pass_context
 def trends_cmd(ctx: click.Context, since: str) -> None:
     """Show notable stories and category/sub-tag volume spikes for the window."""
+    since_days = parse_since(since)
     conn = get_connection(ctx.obj["db_path"])
     try:
         init_db(conn)
-        since_days = parse_since(since)
 
         click.echo("Notable Stories")
         stories = notable_stories(conn, since_days, limit=DEFAULT_LIMIT)
         if not stories:
             click.echo("  (none)")
         for story in stories:
+            sample_text = story.sample_claim_text
+            if len(sample_text) > SAMPLE_CLAIM_TEXT_MAX_CHARS:
+                sample_text = sample_text[:SAMPLE_CLAIM_TEXT_MAX_CHARS] + "..."
             click.echo(
                 f"  [{story.category}] corroborated by {story.corroboration_count} source(s), "
-                f"last seen {story.most_recent_retrieved_at} — {story.sample_claim_text}"
+                f"last seen {story.most_recent_retrieved_at} — {sample_text}"
             )
 
         click.echo("")
