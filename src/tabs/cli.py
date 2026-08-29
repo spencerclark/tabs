@@ -5,6 +5,7 @@ import click
 from tabs import __version__
 from tabs.commands.ingest_cmd import ingest_cmd
 from tabs.commands.sources_cmd import sources_cmd
+from tabs.commands.trends_cmd import trends_cmd
 
 DEFAULT_DB_PATH = Path("data/tabs.db")
 
@@ -26,6 +27,7 @@ def main(ctx: click.Context, db_path: Path) -> None:
 
 main.add_command(ingest_cmd)
 main.add_command(sources_cmd)
+main.add_command(trends_cmd)
 
 
 if __name__ == "__main__":
