@@ -14,7 +14,10 @@ remove, or retier sources (see the comments in the file for what each
 - `tabs ingest [--sources-path PATH]` — sync `sources.yaml` into the database,
   then fetch and store new articles from every source. `--sources-path`
   defaults to `sources.yaml` in the current directory.
-- Both commands accept a global `--db-path PATH` before the subcommand
+- `tabs trends [--since 7d]` — show notable stories (story clusters ranked by
+  corroboration count and recency) and category/sub-tag volume spikes for the
+  window. Computed on demand from existing data — no extra API calls or cost.
+- All three commands accept a global `--db-path PATH` before the subcommand
   (default: `data/tabs.db`), e.g. `tabs --db-path data/tabs.db sources`.
 
 To run ingestion daily via cron, add a line like this to your crontab
